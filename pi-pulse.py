@@ -376,6 +376,8 @@ def main():
         C_im = popt[5 * i + 4]
         t_arr = group["t"]
         fitted_curve = model_complex(t_arr, A, global_T2star, f_val, phi, C_re, C_im)
+        group_params = popt[5 * i : 5 * i + 5]
+        group_result = list(group_params) + [global_T2star]
         all_fits.append(
             {
                 "pulse_time": group["pulse_time"],
@@ -386,7 +388,7 @@ def main():
                 "std_imag": group["std_imag"],
                 "fit_real": fitted_curve.real,
                 "fit_imag": fitted_curve.imag,
-                "popt": popt[5 * i : 5 * i + 5] + [global_T2star],
+                "popt": group_result,
                 "perr": perr[5 * i : 5 * i + 5].tolist() + [perr[-1]],
                 "fit_success": fit_success,
             }
