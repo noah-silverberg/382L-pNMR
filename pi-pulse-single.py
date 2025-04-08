@@ -6,40 +6,25 @@ pi_pulse_single.py
 Purpose
 -------
 Analyze only one of the two sequences: either "+π/2" or "–π/2",
-based on the SIGN_MODE parameter below. It loads all CSV files
-in '327/Pi Pulse Calibration/' that match the naming:
+based on the SIGN_MODE parameter below. It loads CSV files from
+the folder '327/Pulse Calibration Redo' whose filenames follow the format:
 
-    "<tau>_<plus|minus>_<rep>.csv"
+    "<pulse_time>_<plus|minus>_<rep>.csv"
 
-...but then filters so that only those with `sign == SIGN_MODE`
-(plus or minus) are used. The script then:
+Only files matching the chosen SIGN_MODE are processed. For each unique
+pulse time the repeated measurements are averaged into a complex signal.
+A simultaneous composite fit is then performed, with uncertainties (sigma)
+constructed by concatenating the standard deviations of the real and
+imaginary parts.
 
-1. Groups the data by τ (the candidate π-pulse length).
-2. Averages repeats for each τ.
-3. Performs a simultaneous fit to a complex decay model with
-   a *global* T₂* across all τ groups.
-4. Profiles the amplitudes A_i for each group to get robust
-   error bars from χ² profiling.
-5. Fits amplitude vs. τ using a flexible "sinusoid_poly" shape.
-6. Locates either the maximum (for plus) or the minimum (for minus).
-7. Prints the final time for that extremum (peak or valley).
+Finally, a sinusoid-plus-linear model is fitted to the amplitude vs.
+pulse time data. This script then prints the fitted parameters and
+saves plots of the fit, the amplitude-profiling for each group, and the
+sinusoid fit.
 
-You can therefore run:
-
-    SIGN_MODE = 'plus'    # to analyze the +π/2 dataset only
-
-or
-
-    SIGN_MODE = 'minus'   # to analyze the –π/2 dataset only
-
-Implementation Details
-----------------------
-* Data location: '327/Pi Pulse Calibration/<tau>_<sign>_<rep>.csv'
-* Plot naming, CSV output, etc., are analogous to pi-2-pulse.py.
-* Heavy computations are skipped on subsequent runs if
-  "fit_results_SINGLE_<sign>.csv" is already present.
-* You get a single final time – either τ_peak(+π/2) or τ_valley(–π/2).
-
+------------------- USER TOGGLE -------------------
+Set SIGN_MODE to "plus" for +π/2 data, or "minus" for –π/2 data.
+-----------------------------------------------------
 """
 
 import os
@@ -61,14 +46,18 @@ from scipy.optimize import curve_fit
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ------------------- USER TOGGLE HERE -------------------
-SIGN_MODE = "plus"  # or "minus"
+SIGN_MODE = "plus"  # choose "plus" or "minus"
 # --------------------------------------------------------
 
 
 # --------------------------------------------------------
-# 1) MODELS (same as your pi-2-pulse or pi-pulse scripts)
+# 1) MODEL FUNCTIONS
 # --------------------------------------------------------
 def model_complex(t, A, T2star, f, phi, C_re, C_im):
+    """
+    Complex decaying sinusoid:
+      A * exp(-t/T2star) * exp(i*(2π*f*t + phi)) + (C_re + i*C_im)
+    """
     return A * np.exp(-t / T2star) * np.exp(1j * (2 * np.pi * f * t + phi)) + (
         C_re + 1j * C_im
     )
@@ -76,48 +65,64 @@ def model_complex(t, A, T2star, f, phi, C_re, C_im):
 
 def model_simultaneous(dummy_x, *params, group_t_list):
     """
-    Composite fit function.  For each group i, we have parameters:
-       [A_i, f_i, phi_i, C_re_i, C_im_i],
-    plus one global T2star at the end.
+    Composite model for simultaneous fitting.
+    For each group i we have parameters:
+      [A_i, f_i, phi_i, C_re_i, C_im_i]
+    and one global parameter T2star at the end.
+    The output is a 1D array constructed by concatenating
+    each group’s model real and imaginary parts.
     """
     N = len(group_t_list)
     T2star = params[-1]
     out = []
     for i in range(N):
-        A, f, phi, Cre, Cim = params[5 * i : 5 * i + 5]
-        comp = model_complex(group_t_list[i], A, T2star, f, phi, Cre, Cim)
-        # Flatten from complex to real-imag pairs:
-        out.append(np.concatenate(comp.view(np.float64)))
+        A, f, phi, C_re, C_im = params[5 * i : 5 * i + 5]
+        comp = model_complex(group_t_list[i], A, T2star, f, phi, C_re, C_im)
+        # Concatenate real and imag parts so that each complex
+        # array of length M becomes a float array of length 2*M.
+        out.append(np.concatenate((comp.real, comp.imag)))
     return np.concatenate(out)
 
 
-def sinusoid_poly(x, a, f, phi, a2, b, c):
+def sinusoid_plus_linear(x, a, f, phi, b, c):
     """
-    Flexible function to capture amplitude vs. tau:
-      A(tau) = a * sin(2π f tau + phi) * (a2*tau^2 + b*tau) + c
-    Enough freedom to fit minor distortions or offsets.
+    Model: a*sin(2π*f*x + phi) + (b*x + c)
+    Used to fit amplitude vs. pulse time.
     """
-    return a * np.sin(2 * np.pi * f * x + phi) * (a2 * x**2 + b * x) + c
+    return a * np.sin(2 * np.pi * f * x + phi) + (b * x) + c
 
 
-def extremum_of_fit(popt, kind="max", search=(20, 200)):
+def find_max_sinusoid_plus_linear(popt, x_fit):
     """
-    Evaluate the sinusoid_poly over a grid (search range in μs),
-    then find either the maximum or the minimum.
+    Finds the maximum of the sinusoid_plus_linear fit.
     """
-    xx = np.linspace(*search, 5000)
-    yy = sinusoid_poly(xx, *popt)
-    idx = np.argmax(yy) if kind == "max" else np.argmin(yy)
-    return xx[idx], yy[idx]
+    a, f, phi, b, c = popt
+    x = np.linspace(np.min(x_fit), np.max(x_fit), 10000)
+    y = sinusoid_plus_linear(x, a, f, phi, b, c)
+    idx = np.argmax(y)
+    return x[idx], y[idx]
+
+
+def find_min_sinusoid_plus_linear(popt, x_fit):
+    """
+    Finds the minimum of the sinusoid_plus_linear fit.
+    """
+    a, f, phi, b, c = popt
+    x = np.linspace(np.min(x_fit), np.max(x_fit), 10000)
+    y = sinusoid_plus_linear(x, a, f, phi, b, c)
+    idx = np.argmin(y)
+    return x[idx], y[idx]
 
 
 # --------------------------------------------------------
-# 2) PROFILE HELPER – unchanged from older scripts
+# 2) AMPLITUDE PROFILING HELPER
 # --------------------------------------------------------
 def profile_Ai(i_fixed, popt_best, perr, group_t, ydata, sigma_all, folder="profiles"):
     """
-    χ²-profile amplitude A_i around the best-fit solution, to get
-    a robust 1-σ bound.  Saves a profile plot in `folder/`.
+    Profiles the amplitude A_i (for group i_fixed) by scanning over a grid of A values,
+    performing a local fit with A fixed, and computing the chi-square.
+    Returns the best-fit A value and an estimated 1-sigma error.
+    Saves a profile plot in the folder.
     """
     os.makedirs(folder, exist_ok=True)
     A_best = popt_best[5 * i_fixed]
@@ -125,46 +130,41 @@ def profile_Ai(i_fixed, popt_best, perr, group_t, ydata, sigma_all, folder="prof
     A_grid = np.linspace(A_best - dA, A_best + dA, 21)
     chi_vals = []
 
-    # We'll define a "fixed Ai" model by re-building the parameter vector
     def fixed_model(dummy, *free):
         N = len(group_t)
         full = []
         idx_free = 0
         for j in range(N):
             if j == i_fixed:
-                full.append(Ai)
-                # next 4 from free are [f, phi, C_re, C_im]
+                full.append(Ai)  # Ai is set by the outer loop.
                 full.extend(free[idx_free : idx_free + 4])
                 idx_free += 4
             else:
                 full.extend(free[idx_free : idx_free + 5])
                 idx_free += 5
-        full.append(free[-1])  # the global T2star
+        full.append(free[-1])
         return model_simultaneous(None, *full, group_t_list=group_t)
 
     for Ai in A_grid:
-        # build p0 without the amplitude for group i_fixed
-        p0 = []
+        # Build initial guess (exclude amplitude for group i_fixed)
+        p0_local = []
         N = len(group_t)
         for j in range(N):
             if j == i_fixed:
-                p0.extend(popt_best[5 * j + 1 : 5 * j + 5])
+                p0_local.extend(popt_best[5 * j + 1 : 5 * j + 5])
             else:
-                p0.extend(popt_best[5 * j : 5 * j + 5])
-        p0.append(popt_best[-1])  # T2*
-
+                p0_local.extend(popt_best[5 * j : 5 * j + 5])
+        p0_local.append(popt_best[-1])
         try:
             popt_local, _ = curve_fit(
                 lambda d, *fp: fixed_model(d, *fp),
                 None,
                 ydata,
-                p0=p0,
+                p0=p0_local,
                 sigma=sigma_all,
                 absolute_sigma=True,
                 maxfev=4000,
             )
-            # Evaluate χ²
-            # reconstruct the full param vector with Ai
             idx_free = 0
             full_params = []
             for j in range(N):
@@ -181,28 +181,19 @@ def profile_Ai(i_fixed, popt_best, perr, group_t, ydata, sigma_all, folder="prof
             chi_vals.append(chi_sq)
         except RuntimeError:
             chi_vals.append(np.inf)
-
     chi_vals = np.array(chi_vals)
     best_idx = np.argmin(chi_vals)
     A_prof_best = A_grid[best_idx]
     chi_min = chi_vals[best_idx]
-
-    # Find 1-sigma crossing (Δχ² = 1)
-    # We'll try simple linear interpolation on left and right sides
     try:
-        # left side
-        left_slice = slice(None, best_idx)
-        A_left = np.interp(
-            chi_min + 1, chi_vals[left_slice][::-1], A_grid[left_slice][::-1]
+        # Estimate 1-sigma by linear interpolation on either side.
+        left_interp = np.interp(
+            chi_min + 1, chi_vals[:best_idx][::-1], A_grid[:best_idx][::-1]
         )
-        # right side
-        right_slice = slice(best_idx, None)
-        A_right = np.interp(chi_min + 1, chi_vals[right_slice], A_grid[right_slice])
-        err = 0.5 * ((A_prof_best - A_left) + (A_right - A_prof_best))
-    except ValueError:
+        right_interp = np.interp(chi_min + 1, chi_vals[best_idx:], A_grid[best_idx:])
+        err = 0.5 * ((A_prof_best - left_interp) + (right_interp - A_prof_best))
+    except Exception:
         err = np.nan
-
-    # Plot & save
     plt.figure()
     plt.plot(A_grid, chi_vals, "o-")
     plt.axhline(chi_min + 1, color="r", ls="--")
@@ -213,164 +204,237 @@ def profile_Ai(i_fixed, popt_best, perr, group_t, ydata, sigma_all, folder="prof
     plt.tight_layout()
     plt.savefig(os.path.join(folder, f"profile_A_{i_fixed}.png"))
     plt.close()
-
     return i_fixed, A_prof_best, err
 
 
 # --------------------------------------------------------
-# 3) MAIN
+# 3) MAIN SCRIPT
 # --------------------------------------------------------
 def main():
-    base = "327/Pi Pulse Calibration"
-    pattern = re.compile(r"^(?P<tau>\d+)_(?P<sign>plus|minus)_\d+\.csv$")
+    # Folder containing CSV data (use your working folder)
+    folder_name = "4-8-25"
+    # Regex to extract pulse time and sign from filename.
+    pattern = re.compile(r"^(?P<pulse>\d+)_(?P<sign>plus|minus)_\d+\.csv$")
+    # Only keep files matching the chosen SIGN_MODE.
     data_groups = defaultdict(list)
-
-    # Read all files but keep only those that match SIGN_MODE.
-    for fname in os.listdir(base):
+    for fname in os.listdir(folder_name):
         m = pattern.match(fname)
         if not m:
             continue
-        sign = m.group("sign")  # 'plus' or 'minus'
-        if sign != SIGN_MODE:
-            continue  # skip any file that doesn't match our chosen sign
-        tau = int(m.group("tau"))
+        if m.group("sign") != SIGN_MODE:
+            continue
+        pulse_time = int(m.group("pulse"))
         df = pd.read_csv(
-            os.path.join(base, fname), header=None, names=["t", "CH1", "CH2"]
-        ).dropna()
-        df = df[(df["t"] > 0.001) & (df["t"] < 0.004)]
-        data_groups[tau].append(df)
-
-    # Combine repeats (if any) for each tau
-    group_list = []
-    for tau in sorted(data_groups.keys()):
-        dfs = data_groups[tau]
-        t_vals = dfs[0]["t"].values
-        # filter
-        b, a = butter(3, 5000, fs=500000, btype="low")
-        sigs = []
-        for df in dfs:
-            raw = df["CH1"].values + 1j * df["CH2"].values
-            flt = filtfilt(b, a, raw)
-            sigs.append(flt)
-        sigs = np.array(sigs)  # shape: (#repeats, #points)
-        avg = sigs.mean(axis=0)
-        std = sigs.std(axis=0, ddof=1) if len(sigs) > 1 else np.zeros_like(avg)
-        group_list.append(dict(tau=tau, t=t_vals, avg=avg, std=std))
-
-    # Build composite arrays
-    # Each group contributes real and imag data to the global fit
-    ydata = np.concatenate([g["avg"].view(np.float64) for g in group_list])
-    sigma_all = np.concatenate([g["std"].view(np.float64) for g in group_list])
-    sigma_all[sigma_all == 0] = 1.0  # to avoid zero division
-    t_lists = [g["t"] for g in group_list]
-
-    # Decide on a filename based on plus/minus
-    results_file = f"fit_results_SINGLE_{SIGN_MODE}.csv"
-    needs_fit = not os.path.exists(results_file)
-
-    if needs_fit:
-        # ---- Simultaneous Fit ----
-        p0 = []
-        for g in group_list:
-            # same guesses as usual
-            # [A, f, phi, Cre, Cim]
-            A_guess = 15
-            freq_guess = -2000
-            phi_guess = np.angle(g["avg"][0])
-            Cre_guess = -2
-            Cim_guess = 0
-            p0.extend([A_guess, freq_guess, phi_guess, Cre_guess, Cim_guess])
-        p0.append(0.0006)  # global T2*
-
-        try:
-            popt, pcov = curve_fit(
-                lambda d, *pp: model_simultaneous(d, *pp, group_t_list=t_lists),
-                None,
-                ydata,
-                p0=p0,
-                sigma=sigma_all,
-                absolute_sigma=True,
-                maxfev=10000,
-            )
-            perr = np.sqrt(np.diag(pcov))
-        except RuntimeError:
-            popt = np.array([np.nan] * len(p0))
-            perr = np.array([np.nan] * len(p0))
-
-        # ---- Profile A_i ----
-        results = []
-        with ProcessPoolExecutor() as exe:
-            futs = []
-            for i in range(len(group_list)):
-                futs.append(
-                    exe.submit(profile_Ai, i, popt, perr, t_lists, ydata, sigma_all)
-                )
-            for fu in as_completed(futs):
-                idx, val, err = fu.result()
-                results.append(dict(group_idx=idx, A_prof_best=val, A_err=err))
-        # Merge back with group info
-        outrows = []
-        for r in results:
-            g = group_list[r["group_idx"]]
-            outrows.append(dict(tau=g["tau"], A=r["A_prof_best"], A_err=r["A_err"]))
-        outrows = sorted(outrows, key=lambda x: x["tau"])
-        df_out = pd.DataFrame(outrows)
-        df_out.to_csv(results_file, index=False)
-    else:
-        df_out = pd.read_csv(results_file)
-
-    # Now fit amplitude vs. tau with sinusoid_poly
-    if len(df_out) < 3:
-        print(
-            f"Not enough data points (only {len(df_out)}) for sign={SIGN_MODE}. Exiting."
+            os.path.join(folder_name, fname), header=None, names=["t", "CH1", "CH2"]
         )
+        df = df.dropna()
+        # Use an appropriate time window (adjust as needed)
+        if SIGN_MODE == "plus":
+            df = df[(df["t"] > 0.007) & (df["t"] < 0.013)]
+        else:
+            df = df[(df["t"] > 0.018) & (df["t"] < 0.022)]
+        df["CH1"] = df["CH1"] - df["CH1"].mean()
+        df["CH2"] = df["CH2"] - df["CH2"].mean()
+        if len(df) < 10:
+            print(f"Skipping {fname}: not enough data points after filtering.")
+            continue
+        data_groups[pulse_time].append(df)
+
+    if not data_groups:
+        print(f"No data found for sign = {SIGN_MODE}. Exiting.")
         return
 
-    p0_sine = [3, 5e-3, 0, 1e-5, 1e-2, 10]
-    popt_sine, _ = curve_fit(
-        sinusoid_poly,
-        df_out["tau"],
-        df_out["A"],
-        sigma=df_out["A_err"],
-        absolute_sigma=True,
-        p0=p0_sine,
-        maxfev=20000,
-    )
-
-    # Depending on sign, we either want the maximum (plus) or minimum (minus).
-    if SIGN_MODE == "plus":
-        t_ext, A_ext = extremum_of_fit(popt_sine, kind="max")
-        print(f"Sign=plus => Found peak at τ = {t_ext:.2f} us, amplitude = {A_ext:.3f}")
-    else:
-        t_ext, A_ext = extremum_of_fit(popt_sine, kind="min")
-        print(
-            f"Sign=minus => Found valley at τ = {t_ext:.2f} us, amplitude = {A_ext:.3f}"
+    # For each pulse time, average the complex signal.
+    group_data_list = []
+    for pt in sorted(data_groups.keys()):
+        dfs = data_groups[pt]
+        signals = []
+        t_common = None
+        # Use a Butterworth lowpass filter.
+        b, a = butter(3, 5000, btype="lowpass", fs=250000)
+        for df in dfs:
+            t = df["t"].values
+            if t_common is None:
+                t_common = t
+            raw = df["CH1"].values + 1j * df["CH2"].values
+            try:
+                filtered = filtfilt(b, a, raw)
+            except Exception as e:
+                print(f"Error filtering data for pulse {pt} in file {fname}: {e}")
+                continue
+            signals.append(filtered)
+        if len(signals) == 0:
+            print(f"No valid signals for pulse time {pt}. Skipping.")
+            continue
+        signals = np.array(signals)
+        avg_signal = signals.mean(axis=0)
+        # Compute standard deviation for real and imaginary parts separately.
+        std_real = np.std(np.real(signals), axis=0, ddof=1)
+        std_imag = np.std(np.imag(signals), axis=0, ddof=1)
+        group_data_list.append(
+            {
+                "pulse_time": pt,
+                "t": t_common,
+                "avg_signal": avg_signal,
+                "std_real": std_real,
+                "std_imag": std_imag,
+            }
         )
 
-    # Plot
-    xx = np.linspace(df_out["tau"].min(), df_out["tau"].max(), 300)
-    yy = sinusoid_poly(xx, *popt_sine)
+    if not group_data_list:
+        print("No groups with valid data found. Exiting.")
+        return
 
-    plt.figure(figsize=(8, 5))
-    plt.errorbar(
-        df_out["tau"],
-        df_out["A"],
-        yerr=df_out["A_err"],
-        fmt="o",
-        label=f"{SIGN_MODE} data",
+    # ----- Compute envelope-based peak amplitudes for each pulse time group -----
+    from scipy.signal import hilbert
+    from scipy.ndimage import gaussian_filter1d
+
+    amplitude_list = []
+    pulse_times = []
+    for group in group_data_list:
+        avg_signal = group["avg_signal"]
+
+        # Compute envelopes for real and imaginary parts.
+        env_real = np.abs(hilbert(avg_signal.real))
+        env_imag = np.abs(hilbert(avg_signal.imag))
+
+        # Smooth the envelopes using a Gaussian filter.
+        smooth_real = gaussian_filter1d(env_real, sigma=20)
+        smooth_imag = gaussian_filter1d(env_imag, sigma=15)
+
+        # Detect peak indices (use np.argmax on the smoothed envelope).
+        peak_idx_real = np.argmax(smooth_real)
+        peak_idx_imag = np.argmax(smooth_imag)
+
+        # Use the detected peak values.
+        peak_real = smooth_real[peak_idx_real]
+        peak_imag = smooth_imag[peak_idx_imag]
+
+        # Compute the amplitude as the average of the two peaks.
+        amplitude = (peak_real + peak_imag) / 2.0
+        amplitude_list.append(amplitude)
+        pulse_times.append(group["pulse_time"])
+
+        # Store the smoothed envelopes and peak indices for later plotting.
+        group["smooth_env_real"] = smooth_real
+        group["smooth_env_imag"] = smooth_imag
+        group["peak_idx_real"] = peak_idx_real
+        group["peak_idx_imag"] = peak_idx_imag
+
+    # Create a summary DataFrame for the sinusoid fit.
+    results_df = pd.DataFrame({"Pulse Time (us)": pulse_times, "A": amplitude_list})
+    print("Envelope amplitudes extracted for each pulse time group:")
+    print(results_df)
+
+    # ----- Plot original averaged signals with their envelopes and detected peaks -----
+    fig, axs = plt.subplots(
+        nrows=len(group_data_list), ncols=2, figsize=(12, 3 * len(group_data_list))
     )
-    plt.plot(xx, yy, "--", label="sinusoid fit")
-    plt.axvline(t_ext, color="k", ls=":")
-    plt.title(f"{SIGN_MODE.upper()}: amplitude vs. τ  (extremum at {t_ext:.2f} µs)")
-    plt.xlabel("Candidate π-pulse length (µs)")
-    plt.ylabel("Fitted amplitude A")
-    plt.legend()
+
+    # Ensure axs is 2D even if there is only one group.
+    if len(group_data_list) == 1:
+        axs = np.array([axs])
+
+    for i, group in enumerate(group_data_list):
+        t = group["t"]
+        avg_signal = group["avg_signal"]
+        smooth_env_real = group["smooth_env_real"]
+        smooth_env_imag = group["smooth_env_imag"]
+        peak_idx_real = group["peak_idx_real"]
+        peak_idx_imag = group["peak_idx_imag"]
+
+        # Plot Real part.
+        axs[i, 0].plot(t, avg_signal.real, "b-", label="Real Signal")
+        axs[i, 0].plot(t, smooth_env_real, "r--", label="Envelope")
+        axs[i, 0].plot(
+            t[peak_idx_real],
+            smooth_env_real[peak_idx_real],
+            "ko",
+            markersize=8,
+            label="Peak",
+        )
+        axs[i, 0].set_title(f'Pulse Time {group["pulse_time"]} µs (Real)')
+        axs[i, 0].set_xlabel("Time (s)")
+        axs[i, 0].set_ylabel("Amplitude")
+        axs[i, 0].legend(fontsize="small")
+
+        # Plot Imaginary part.
+        axs[i, 1].plot(t, avg_signal.imag, "b-", label="Imag Signal")
+        axs[i, 1].plot(t, smooth_env_imag, "r--", label="Envelope")
+        axs[i, 1].plot(
+            t[peak_idx_imag],
+            smooth_env_imag[peak_idx_imag],
+            "ko",
+            markersize=8,
+            label="Peak",
+        )
+        axs[i, 1].set_title(f'Pulse Time {group["pulse_time"]} µs (Imag)')
+        axs[i, 1].set_xlabel("Time (s)")
+        axs[i, 1].set_ylabel("Amplitude")
+        axs[i, 1].legend(fontsize="small")
+
     plt.tight_layout()
-    plt.savefig(f"single_{SIGN_MODE}_summary.png")
+    plt.savefig("envelopes_with_peaks.png")
     plt.close()
 
-    print("Analysis complete. Fit results saved to:", results_file)
-    print("Plot saved to: single_{SIGN_MODE}_summary.png")
+    # ----- SINUSOID PLUS LINEAR FIT TO AMPLITUDE vs. PULSE TIME -----
+    # Use the summary results from the simultaneous fit.
+    # In this script we model A vs. pulse time with: a*sin(2π*f*x+phi) + (b*x+c)
+    p0_sine = [3, 5e-3, 0, 1e-5, 1e-2]  # initial guess: [a, f, phi, b, c]
+    try:
+        # ----- Sinusoid-plus-linear fit using the extracted amplitudes -----
+        p0_sine = [3, 5e-3, 0, 1e-5, 1e-2]  # initial guess: [a, f, phi, b, c]
+        popt_sine, pcov_sine = curve_fit(
+            sinusoid_plus_linear,
+            results_df["Pulse Time (us)"],
+            results_df["A"],
+            p0=p0_sine,
+            maxfev=100000,
+        )
+
+    except RuntimeError:
+        print("Sinusoid fit failed.")
+        return
+
+    print("Sinusoid plus linear fit parameters:", popt_sine)
+    x_fit = np.linspace(
+        results_df["Pulse Time (us)"].min(), results_df["Pulse Time (us)"].max(), 200
+    )
+    y_fit = sinusoid_plus_linear(x_fit, *popt_sine)
+    plt.figure(figsize=(8, 5))
+    plt.errorbar(
+        results_df["Pulse Time (us)"],
+        results_df["A"],
+        # yerr=results_df["A_err"],
+        fmt="o",
+        capsize=4,
+        label="Data (profiled σ)",
+    )
+    plt.plot(x_fit, y_fit, "--", label="Sinusoid plus linear fit")
+    plt.xlabel("Pulse Time (us)")
+    plt.ylabel("Amplitude A")
+    plt.title("Fit Parameter A vs. Pulse Time")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("sinusoid_fit_SINGLE_{}.png".format(SIGN_MODE))
+    plt.close()
+
+    # # Compute reduced chi-square for the sinusoid fit.
+    # residuals = results_df["A"] - sinusoid_plus_linear(
+    #     results_df["Pulse Time (us)"], *popt_sine
+    # )
+    # chi_square = np.sum((residuals / results_df["A_err"]) ** 2)
+    # dof = len(results_df) - len(popt_sine)
+    # reduced_chi_square = chi_square / dof
+    # print(f"Reduced Chi-square for sinusoid fit: {reduced_chi_square:.4f}")
+
+    # Find maximum and minimum.
+    max_x, max_y = find_max_sinusoid_plus_linear(popt_sine, x_fit)
+    min_x, min_y = find_min_sinusoid_plus_linear(popt_sine, x_fit)
+    print("Sinusoid plus linear fit results:")
+    print(f"Peak (Pi/2 pulse) at: {max_x:.4f} us, amplitude = {max_y:.4f}")
+    print(f"Valley (Pi pulse) at: {min_x:.4f} us, amplitude = {min_y:.4f}")
 
 
 if __name__ == "__main__":
