@@ -116,6 +116,16 @@ def sinusoid_poly(x, a, f, phi, a2, b, c):
     return a * np.sin(2 * np.pi * f * x + phi) * (a2 * x**2 + b * x) + c
 
 
+def sinusoid_plus_linear(x, a, f, phi, b, c):
+    # Returns: a * |sin(2*pi*f*x + phi)| multiplied by the polynomial (a2*x^2 + b*x)
+    return a * np.sin(2 * np.pi * f * x + phi) + (b * x) + c
+
+
+def sinusoid_cube(x, a, f, phi, a2, b, c, d):
+    # Returns: a * |sin(2*pi*f*x + phi)| multiplied by the polynomial (a2*x^2 + b*x)
+    return a * np.sin(2 * np.pi * f * x + phi) * (d * x**3 + a2 * x**2 + b * x) + c
+
+
 def find_max_abs_sinusoid(popt, x_fit):
     """Find the x-value (pulse time) where the absolute sinusoid is maximized."""
     a, f, phi = popt
@@ -142,6 +152,30 @@ def find_min_sinusoid_poly(popt, x_fit, range=(80, 120)):
     # Find the minimum of the entire function, in the range 40-60 us
     x = np.linspace(*range, 10000)
     y = sinusoid_poly(x, a, f, phi, a2, b, c)
+    min_idx = np.argmin(y)
+    min_x = x[min_idx]
+    min_y = y[min_idx]
+    return min_x, min_y
+
+
+def find_max_sinusoid_plus_linear(popt, x_fit):
+    """Find the x-value (pulse time) where the sinusoid polynomial is maximized."""
+    a, f, phi, b, c = popt
+    # Find the maximum of the entire function, in the range 40-60 us
+    x = np.linspace(40, 60, 10000)
+    y = sinusoid_plus_linear(x, a, f, phi, b, c)
+    max_idx = np.argmax(y)
+    max_x = x[max_idx]
+    max_y = y[max_idx]
+    return max_x, max_y
+
+
+def find_min_sinusoid_plus_linear(popt, x_fit):
+    """Find the x-value (pulse time) where the sinusoid polynomial is minimized."""
+    a, f, phi, b, c = popt
+    # Find the minimum of the entire function, in the range 80-120 us
+    x = np.linspace(80, 120, 10000)
+    y = sinusoid_plus_linear(x, a, f, phi, b, c)
     min_idx = np.argmin(y)
     min_x = x[min_idx]
     min_y = y[min_idx]
@@ -388,8 +422,11 @@ def main():
         p0 = []
         for group in group_data_list:
             avg_signal = group["avg_signal"]
-            # Guess: A=15, f=-2200 Hz, phi=phase of first point, C_real=-2, C_imag=0.
-            p0.extend([15, -2200, np.angle(avg_signal[0]), -2, 0])
+            if group["pulse_time"] == 40:
+                p0.extend([14, -2400, -0.2, -1.7, 0])
+            else:
+                # Guess: A=15, f=-2200 Hz, phi=phase of first point, C_real=-2, C_imag=0.
+                p0.extend([15, -2100, -0.6, -1.5, 0])
         p0.append(0.00063)  # Global T2star guess.
         sigma_all = np.concatenate(
             [group["std_real"] for group in group_data_list]
@@ -616,9 +653,10 @@ def main():
     # Parameters: a, f, phi, a2, b
     # Equation: a * |sin(2*pi*f*x + phi)| * (a2*x^2 + b*x + c)
     # p0_sin = [3e0, 5e-5, 0, 0, 1e-2, 10]
-    p0_sin = [3e0, 5e-3, 0, 1e-5, 1e-2, 11]
+    # p0_sin = [3e0, 5e-3, 0, 1e-5, 1e-2, 11]
+    p0_sin = [3e0, 5e-3, 0, 1e-2, 11]
     popt_sin, pcov_sin = curve_fit(
-        sinusoid_poly,
+        sinusoid_plus_linear,
         results_df["Pulse Time (us)"],
         results_df["A"],
         sigma=profiled_df["A_err_est"],
@@ -630,7 +668,7 @@ def main():
     x_fit = np.linspace(
         results_df["Pulse Time (us)"].min(), results_df["Pulse Time (us)"].max(), 200
     )
-    y_fit = sinusoid_poly(x_fit, *popt_sin)
+    y_fit = sinusoid_plus_linear(x_fit, *popt_sin)
     plt.figure(figsize=(8, 5))
     plt.errorbar(
         results_df["Pulse Time (us)"],
@@ -650,8 +688,29 @@ def main():
     plt.savefig("sinusoid_fit.png")
     plt.close()
 
+    # # Reduced chi-square of the sinusoid fit
+    # residuals = results_df["A"] - sinusoid_poly(
+    #     results_df["Pulse Time (us)"], *popt_sin
+    # )
+    # chi_square = np.sum((residuals / profiled_df["A_err_est"]) ** 2)
+    # dof = len(results_df) - len(popt_sin)
+    # reduced_chi_square = chi_square / dof
+    # print(f"Reduced Chi-square for sinusoid fit: {reduced_chi_square:.4f}")
+
+    # # Find maximum of the absolute sinusoid fit.
+    # max_x, max_y = find_max_sinusoid_poly(popt_sin, x_fit)
+    # print("Pi/2 Pulse Time:")
+    # print(f"Max x (Pulse Time): {max_x:.4f} us")
+    # print(f"Max y (Amplitude): {max_y:.4f}")
+
+    # # Find minimum of the sinusoid polynomial fit.
+    # min_x, min_y = find_min_sinusoid_poly(popt_sin, x_fit)
+    # print("Pi Pulse Time:")
+    # print(f"Min x (Pulse Time): {min_x:.4f} us")
+    # print(f"Min y (Amplitude): {min_y:.4f}")
+
     # Reduced chi-square of the sinusoid fit
-    residuals = results_df["A"] - sinusoid_poly(
+    residuals = results_df["A"] - sinusoid_plus_linear(
         results_df["Pulse Time (us)"], *popt_sin
     )
     chi_square = np.sum((residuals / profiled_df["A_err_est"]) ** 2)
@@ -660,13 +719,13 @@ def main():
     print(f"Reduced Chi-square for sinusoid fit: {reduced_chi_square:.4f}")
 
     # Find maximum of the absolute sinusoid fit.
-    max_x, max_y = find_max_sinusoid_poly(popt_sin, x_fit)
+    max_x, max_y = find_max_sinusoid_plus_linear(popt_sin, x_fit)
     print("Pi/2 Pulse Time:")
     print(f"Max x (Pulse Time): {max_x:.4f} us")
     print(f"Max y (Amplitude): {max_y:.4f}")
 
     # Find minimum of the sinusoid polynomial fit.
-    min_x, min_y = find_min_sinusoid_poly(popt_sin, x_fit)
+    min_x, min_y = find_min_sinusoid_plus_linear(popt_sin, x_fit)
     print("Pi Pulse Time:")
     print(f"Min x (Pulse Time): {min_x:.4f} us")
     print(f"Min y (Amplitude): {min_y:.4f}")
