@@ -55,6 +55,10 @@ def main():
                 continue
             lower = file.lower()
             rel_path = os.path.relpath(full_path, base_dir)
+            # If the file is not in the 'old-code' directory
+            if "old-code" in rel_path:
+                continue
+
             if lower.endswith(".py"):
                 output_lines.append(process_py_file(full_path, rel_path))
             elif lower.endswith(".ipynb"):
