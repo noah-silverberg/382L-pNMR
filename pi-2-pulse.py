@@ -661,11 +661,13 @@ def main():
 
     # Find maximum of the absolute sinusoid fit.
     max_x, max_y = find_max_sinusoid_poly(popt_sin, x_fit)
+    print("Pi/2 Pulse Time:")
     print(f"Max x (Pulse Time): {max_x:.4f} us")
     print(f"Max y (Amplitude): {max_y:.4f}")
 
     # Find minimum of the sinusoid polynomial fit.
     min_x, min_y = find_min_sinusoid_poly(popt_sin, x_fit)
+    print("Pi Pulse Time:")
     print(f"Min x (Pulse Time): {min_x:.4f} us")
     print(f"Min y (Amplitude): {min_y:.4f}")
 
