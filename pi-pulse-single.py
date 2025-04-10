@@ -294,6 +294,11 @@ def main():
     amplitude_err_list = []
     pulse_times = []
 
+    # Create lists to store all individual measurements for the fit
+    all_pulse_time_vals = []
+    all_A_vals = []
+    all_A_sigma = []
+
     for group in group_data_list:
         # For each group, compute the amplitude for every individual signal.
         individual_As = []
@@ -318,6 +323,11 @@ def main():
         amplitude = np.mean(individual_As)
         # Standard deviation divided by sqrt(n) gives the standard error:
         amplitude_err = np.std(individual_As, ddof=1) / np.sqrt(len(individual_As))
+
+        n_points = len(individual_As)
+        all_pulse_time_vals.extend([group["pulse_time"]] * n_points)
+        all_A_vals.extend(individual_As)
+        all_A_sigma.extend([amplitude_err] * n_points)
 
         amplitude_list.append(amplitude)
         amplitude_err_list.append(amplitude_err)
@@ -415,13 +425,17 @@ def main():
     try:
         # ----- Sinusoid-plus-linear fit using the extracted amplitudes -----
         p0_sine = [3, 5e-3, 0, 1e-5, 1e-2]  # initial guess: [a, f, phi, b, c]
+        all_pulse_time_vals = np.array(all_pulse_time_vals)
+        all_A_vals = np.array(all_A_vals)
+        all_A_sigma = np.array(all_A_sigma)
+
         popt_sine, pcov_sine = curve_fit(
             sinusoid_plus_linear,
-            results_df["Pulse Time (us)"],
-            results_df["A"],
+            all_pulse_time_vals,
+            all_A_vals,
             p0=p0_sine,
             maxfev=100000,
-            sigma=results_df["A_err"],
+            sigma=all_A_sigma,
             absolute_sigma=True,
         )
 
@@ -455,11 +469,10 @@ def main():
     plt.close()
 
     # Compute reduced chi-square for the sinusoid fit.
-    residuals = results_df["A"] - sinusoid_plus_linear(
-        results_df["Pulse Time (us)"], *popt_sine
-    )
-    chi_sq = np.sum((residuals / results_df["A_err"]) ** 2)
-    dof = len(results_df) - len(popt_sine)
+    fitted_all = sinusoid_plus_linear(all_pulse_time_vals, *popt_sine)
+    residuals = all_A_vals - fitted_all
+    chi_sq = np.sum((residuals / all_A_sigma) ** 2)
+    dof = len(all_A_vals) - len(popt_sine)
     reduced_chi_sq = chi_sq / dof
     print(f"Reduced chi-square for sinusoid fit: {reduced_chi_sq:.4f}")
 
