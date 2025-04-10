@@ -263,9 +263,9 @@ def main():
                 print(f"Error filtering data for pulse {pt} in file {fname}: {e}")
                 continue
             signals.append(filtered)
-        if len(signals) == 0:
-            print(f"No valid signals for pulse time {pt}. Skipping.")
-            continue
+            if len(signals) == 0:
+                print(f"No valid signals for pulse time {pt}. Skipping.")
+                continue
         signals = np.array(signals)
         avg_signal = signals.mean(axis=0)
         # Compute standard deviation for real and imaginary parts separately.
@@ -278,6 +278,7 @@ def main():
                 "avg_signal": avg_signal,
                 "std_real": std_real,
                 "std_imag": std_imag,
+                "signals": signals,
             }
         )
 
@@ -290,40 +291,49 @@ def main():
     from scipy.ndimage import gaussian_filter1d
 
     amplitude_list = []
+    amplitude_err_list = []
     pulse_times = []
+
     for group in group_data_list:
-        avg_signal = group["avg_signal"]
+        # For each group, compute the amplitude for every individual signal.
+        individual_As = []
+        for signal in group["signals"]:
+            # Compute envelopes of the individual signal (real and imaginary parts)
+            env_real_ind = np.abs(hilbert(signal.real))
+            env_imag_ind = np.abs(hilbert(signal.imag))
 
-        # Compute envelopes for real and imaginary parts.
-        env_real = np.abs(hilbert(avg_signal.real))
-        env_imag = np.abs(hilbert(avg_signal.imag))
+            # Smooth the envelopes.
+            smooth_real_ind = gaussian_filter1d(env_real_ind, sigma=30)
+            smooth_imag_ind = gaussian_filter1d(env_imag_ind, sigma=30)
 
-        # Smooth the envelopes using a Gaussian filter.
-        smooth_real = gaussian_filter1d(env_real, sigma=20)
-        smooth_imag = gaussian_filter1d(env_imag, sigma=15)
+            # Detect peak values.
+            peak_real_ind = np.max(smooth_real_ind)
+            peak_imag_ind = np.max(smooth_imag_ind)
 
-        # Detect peak indices (use np.argmax on the smoothed envelope).
-        peak_idx_real = np.argmax(smooth_real)
-        peak_idx_imag = np.argmax(smooth_imag)
+            # Compute amplitude for this individual signal.
+            A_ind = (peak_real_ind + peak_imag_ind) / 2.0
+            individual_As.append(A_ind)
 
-        # Use the detected peak values.
-        peak_real = smooth_real[peak_idx_real]
-        peak_imag = smooth_imag[peak_idx_imag]
+        # Compute the mean amplitude and error (using the standard error).
+        amplitude = np.mean(individual_As)
+        # Standard deviation divided by sqrt(n) gives the standard error:
+        amplitude_err = np.std(individual_As, ddof=1) / np.sqrt(len(individual_As))
 
-        # Compute the amplitude as the average of the two peaks.
-        amplitude = (peak_real + peak_imag) / 2.0
         amplitude_list.append(amplitude)
+        amplitude_err_list.append(amplitude_err)
         pulse_times.append(group["pulse_time"])
 
-        # Store the smoothed envelopes and peak indices for later plotting.
-        group["smooth_env_real"] = smooth_real
-        group["smooth_env_imag"] = smooth_imag
-        group["peak_idx_real"] = peak_idx_real
-        group["peak_idx_imag"] = peak_idx_imag
-
-    # Create a summary DataFrame for the sinusoid fit.
-    results_df = pd.DataFrame({"Pulse Time (us)": pulse_times, "A": amplitude_list})
-    print("Envelope amplitudes extracted for each pulse time group:")
+    # Create a summary DataFrame including the amplitude error.
+    results_df = pd.DataFrame(
+        {
+            "Pulse Time (us)": pulse_times,
+            "A": amplitude_list,
+            "A_err": amplitude_err_list,
+        }
+    )
+    print(
+        "Envelope amplitudes and their error estimates extracted for each pulse time group:"
+    )
     print(results_df)
 
     # ----- Plot original averaged signals with their envelopes and detected peaks -----
@@ -335,46 +345,67 @@ def main():
     if len(group_data_list) == 1:
         axs = np.array([axs])
 
+    # ----- Plot individual signals with their envelopes and detected peaks -----
+    # Loop over each group in group_data_list
     for i, group in enumerate(group_data_list):
+        n_signals = len(group["signals"])  # number of individual signals in this group
+        # Create a subplot grid with one row per signal, two columns (Real and Imag)
+        fig, axs = plt.subplots(n_signals, 2, figsize=(12, 3 * n_signals))
+
+        # In case there is only one signal, force axs to be 2D.
+        if n_signals == 1:
+            axs = np.array([axs])
+
+        # Get the common time axis for the current group.
         t = group["t"]
-        avg_signal = group["avg_signal"]
-        smooth_env_real = group["smooth_env_real"]
-        smooth_env_imag = group["smooth_env_imag"]
-        peak_idx_real = group["peak_idx_real"]
-        peak_idx_imag = group["peak_idx_imag"]
 
-        # Plot Real part.
-        axs[i, 0].plot(t, avg_signal.real, "b-", label="Real Signal")
-        axs[i, 0].plot(t, smooth_env_real, "r--", label="Envelope")
-        axs[i, 0].plot(
-            t[peak_idx_real],
-            smooth_env_real[peak_idx_real],
-            "ko",
-            markersize=8,
-            label="Peak",
-        )
-        axs[i, 0].set_title(f'Pulse Time {group["pulse_time"]} µs (Real)')
-        axs[i, 0].set_xlabel("Time (s)")
-        axs[i, 0].set_ylabel("Amplitude")
-        axs[i, 0].legend(fontsize="small")
+        # Loop over each individual signal in the current group
+        for j, signal in enumerate(group["signals"]):
+            # Compute the envelope of the real and imaginary parts using the Hilbert transform.
+            env_real = np.abs(hilbert(signal.real))
+            env_imag = np.abs(hilbert(signal.imag))
 
-        # Plot Imaginary part.
-        axs[i, 1].plot(t, avg_signal.imag, "b-", label="Imag Signal")
-        axs[i, 1].plot(t, smooth_env_imag, "r--", label="Envelope")
-        axs[i, 1].plot(
-            t[peak_idx_imag],
-            smooth_env_imag[peak_idx_imag],
-            "ko",
-            markersize=8,
-            label="Peak",
-        )
-        axs[i, 1].set_title(f'Pulse Time {group["pulse_time"]} µs (Imag)')
-        axs[i, 1].set_xlabel("Time (s)")
-        axs[i, 1].set_ylabel("Amplitude")
-        axs[i, 1].legend(fontsize="small")
+            # Smooth the envelopes using a Gaussian filter.
+            smooth_env_real = gaussian_filter1d(env_real, sigma=30)
+            smooth_env_imag = gaussian_filter1d(env_imag, sigma=30)
 
-    plt.tight_layout()
-    plt.savefig("envelopes_with_peaks.png")
+            # Find the peak indices (maximum value) in the smoothed envelopes.
+            peak_idx_real = np.argmax(smooth_env_real)
+            peak_idx_imag = np.argmax(smooth_env_imag)
+
+            # Plot the Real part:
+            axs[j, 0].plot(t, signal.real, "b-", label="Real Signal")
+            axs[j, 0].plot(t, smooth_env_real, "r--", label="Envelope")
+            axs[j, 0].plot(
+                t[peak_idx_real],
+                smooth_env_real[peak_idx_real],
+                "ko",
+                markersize=8,
+                label="Peak",
+            )
+            axs[j, 0].set_title(f'Pulse {group["pulse_time"]} µs - Signal {j+1} (Real)')
+            axs[j, 0].set_xlabel("Time (s)")
+            axs[j, 0].set_ylabel("Amplitude")
+            axs[j, 0].legend(fontsize="small")
+
+            # Plot the Imaginary part:
+            axs[j, 1].plot(t, signal.imag, "b-", label="Imag Signal")
+            axs[j, 1].plot(t, smooth_env_imag, "r--", label="Envelope")
+            axs[j, 1].plot(
+                t[peak_idx_imag],
+                smooth_env_imag[peak_idx_imag],
+                "ko",
+                markersize=8,
+                label="Peak",
+            )
+            axs[j, 1].set_title(f'Pulse {group["pulse_time"]} µs - Signal {j+1} (Imag)')
+            axs[j, 1].set_xlabel("Time (s)")
+            axs[j, 1].set_ylabel("Amplitude")
+            axs[j, 1].legend(fontsize="small")
+
+        plt.tight_layout()
+        # Save each group's figure with a filename that indicates the pulse time.
+        plt.savefig(f"individual_envelopes_group_{group['pulse_time']}.png")
     plt.close()
 
     # ----- SINUSOID PLUS LINEAR FIT TO AMPLITUDE vs. PULSE TIME -----
@@ -390,6 +421,8 @@ def main():
             results_df["A"],
             p0=p0_sine,
             maxfev=100000,
+            sigma=results_df["A_err"],
+            absolute_sigma=True,
         )
 
     except RuntimeError:
@@ -405,11 +438,12 @@ def main():
     plt.errorbar(
         results_df["Pulse Time (us)"],
         results_df["A"],
-        # yerr=results_df["A_err"],
+        yerr=results_df["A_err"],
         fmt="o",
         capsize=4,
-        label="Data (profiled σ)",
+        label="Data (with σ)",
     )
+
     plt.plot(x_fit, y_fit, "--", label="Sinusoid plus linear fit")
     plt.xlabel("Pulse Time (us)")
     plt.ylabel("Amplitude A")
@@ -420,21 +454,19 @@ def main():
     plt.savefig("sinusoid_fit_SINGLE_{}.png".format(SIGN_MODE))
     plt.close()
 
-    # # Compute reduced chi-square for the sinusoid fit.
-    # residuals = results_df["A"] - sinusoid_plus_linear(
-    #     results_df["Pulse Time (us)"], *popt_sine
-    # )
-    # chi_square = np.sum((residuals / results_df["A_err"]) ** 2)
-    # dof = len(results_df) - len(popt_sine)
-    # reduced_chi_square = chi_square / dof
-    # print(f"Reduced Chi-square for sinusoid fit: {reduced_chi_square:.4f}")
+    # Compute reduced chi-square for the sinusoid fit.
+    residuals = results_df["A"] - sinusoid_plus_linear(
+        results_df["Pulse Time (us)"], *popt_sine
+    )
+    chi_sq = np.sum((residuals / results_df["A_err"]) ** 2)
+    dof = len(results_df) - len(popt_sine)
+    reduced_chi_sq = chi_sq / dof
+    print(f"Reduced chi-square for sinusoid fit: {reduced_chi_sq:.4f}")
 
     # Find maximum and minimum.
     max_x, max_y = find_max_sinusoid_plus_linear(popt_sine, x_fit)
-    min_x, min_y = find_min_sinusoid_plus_linear(popt_sine, x_fit)
     print("Sinusoid plus linear fit results:")
     print(f"Peak (Pi/2 pulse) at: {max_x:.4f} us, amplitude = {max_y:.4f}")
-    print(f"Valley (Pi pulse) at: {min_x:.4f} us, amplitude = {min_y:.4f}")
 
 
 if __name__ == "__main__":
