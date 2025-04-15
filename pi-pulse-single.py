@@ -36,10 +36,10 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-import matplotlib
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+plt.style.use("seaborn-v0_8-whitegrid")
 
 from scipy.signal import butter, filtfilt
 from scipy.optimize import curve_fit
@@ -112,99 +112,6 @@ def find_min_sinusoid_plus_linear(popt, x_fit):
     y = sinusoid_plus_linear(x, a, f, phi, b, c)
     idx = np.argmin(y)
     return x[idx], y[idx]
-
-
-# --------------------------------------------------------
-# 2) AMPLITUDE PROFILING HELPER
-# --------------------------------------------------------
-def profile_Ai(i_fixed, popt_best, perr, group_t, ydata, sigma_all, folder="profiles"):
-    """
-    Profiles the amplitude A_i (for group i_fixed) by scanning over a grid of A values,
-    performing a local fit with A fixed, and computing the chi-square.
-    Returns the best-fit A value and an estimated 1-sigma error.
-    Saves a profile plot in the folder.
-    """
-    os.makedirs(folder, exist_ok=True)
-    A_best = popt_best[5 * i_fixed]
-    dA = 1.5 * abs(perr[5 * i_fixed])
-    A_grid = np.linspace(A_best - dA, A_best + dA, 21)
-    chi_vals = []
-
-    def fixed_model(dummy, *free):
-        N = len(group_t)
-        full = []
-        idx_free = 0
-        for j in range(N):
-            if j == i_fixed:
-                full.append(Ai)  # Ai is set by the outer loop.
-                full.extend(free[idx_free : idx_free + 4])
-                idx_free += 4
-            else:
-                full.extend(free[idx_free : idx_free + 5])
-                idx_free += 5
-        full.append(free[-1])
-        return model_simultaneous(None, *full, group_t_list=group_t)
-
-    for Ai in A_grid:
-        # Build initial guess (exclude amplitude for group i_fixed)
-        p0_local = []
-        N = len(group_t)
-        for j in range(N):
-            if j == i_fixed:
-                p0_local.extend(popt_best[5 * j + 1 : 5 * j + 5])
-            else:
-                p0_local.extend(popt_best[5 * j : 5 * j + 5])
-        p0_local.append(popt_best[-1])
-        try:
-            popt_local, _ = curve_fit(
-                lambda d, *fp: fixed_model(d, *fp),
-                None,
-                ydata,
-                p0=p0_local,
-                sigma=sigma_all,
-                absolute_sigma=True,
-                maxfev=4000,
-            )
-            idx_free = 0
-            full_params = []
-            for j in range(N):
-                if j == i_fixed:
-                    full_params.append(Ai)
-                    full_params.extend(popt_local[idx_free : idx_free + 4])
-                    idx_free += 4
-                else:
-                    full_params.extend(popt_local[idx_free : idx_free + 5])
-                    idx_free += 5
-            full_params.append(popt_local[-1])
-            resid = ydata - model_simultaneous(None, *full_params, group_t_list=group_t)
-            chi_sq = np.sum((resid / sigma_all) ** 2)
-            chi_vals.append(chi_sq)
-        except RuntimeError:
-            chi_vals.append(np.inf)
-    chi_vals = np.array(chi_vals)
-    best_idx = np.argmin(chi_vals)
-    A_prof_best = A_grid[best_idx]
-    chi_min = chi_vals[best_idx]
-    try:
-        # Estimate 1-sigma by linear interpolation on either side.
-        left_interp = np.interp(
-            chi_min + 1, chi_vals[:best_idx][::-1], A_grid[:best_idx][::-1]
-        )
-        right_interp = np.interp(chi_min + 1, chi_vals[best_idx:], A_grid[best_idx:])
-        err = 0.5 * ((A_prof_best - left_interp) + (right_interp - A_prof_best))
-    except Exception:
-        err = np.nan
-    plt.figure()
-    plt.plot(A_grid, chi_vals, "o-")
-    plt.axhline(chi_min + 1, color="r", ls="--")
-    plt.axvline(A_prof_best, color="g", ls="--")
-    plt.xlabel(f"A_{i_fixed}")
-    plt.ylabel("Chi-square")
-    plt.title(f"Profiling A_{i_fixed}")
-    plt.tight_layout()
-    plt.savefig(os.path.join(folder, f"profile_A_{i_fixed}.png"))
-    plt.close()
-    return i_fixed, A_prof_best, err
 
 
 # --------------------------------------------------------
@@ -458,10 +365,10 @@ def main():
         label="Data (with σ)",
     )
 
-    plt.plot(x_fit, y_fit, "--", label="Sinusoid plus linear fit")
-    plt.xlabel("Pulse Time (us)")
-    plt.ylabel("Amplitude A")
-    plt.title("Fit Parameter A vs. Pulse Time")
+    plt.plot(x_fit, y_fit, "--", label="Sinusoid + Linear Fit")
+    plt.xlabel("Pulse Time (μs)")
+    plt.ylabel("Amplitude (a.u.)")
+    plt.title("Amplitude vs Pulse Time")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
