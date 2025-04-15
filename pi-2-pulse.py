@@ -550,6 +550,11 @@ def main():
                         "Pulse Time (us)": fit["pulse_time"],
                         "A": A_val,
                         "A_err": A_err_val,
+                        "f": fit["popt"][1],
+                        "phi": fit["popt"][2],
+                        "C_real": fit["popt"][3],
+                        "C_imag": fit["popt"][4],
+                        "T2star": fit["popt"][-1],
                     }
                 )
         results_df = pd.DataFrame(results_list).sort_values("Pulse Time (us)")
@@ -652,8 +657,6 @@ def main():
     # ----- Sinusoid Fit to A vs. Pulse Time -----
     # Parameters: a, f, phi, a2, b
     # Equation: a * |sin(2*pi*f*x + phi)| * (a2*x^2 + b*x + c)
-    # p0_sin = [3e0, 5e-5, 0, 0, 1e-2, 10]
-    # p0_sin = [3e0, 5e-3, 0, 1e-5, 1e-2, 11]
     p0_sin = [3e0, 5e-3, 0, 1e-2, 11]
     popt_sin, pcov_sin = curve_fit(
         sinusoid_plus_linear,
@@ -671,17 +674,17 @@ def main():
     y_fit = sinusoid_plus_linear(x_fit, *popt_sin)
     plt.figure(figsize=(8, 5))
     plt.errorbar(
-        results_df["Pulse Time (us)"],
+        results_df["Pulse Time (us)"] / 2,
         results_df["A"],
         yerr=profiled_df["A_err_est"],
         fmt="o",
         capsize=4,
         label="Data (profiled σ)",
     )
-    plt.plot(x_fit, y_fit, "--", label="Absolute Sinusoid Fit")
+    plt.plot(x_fit / 2, y_fit, "--", label="Sinusoid Fit")
     plt.xlabel("Pulse Time (us)")
     plt.ylabel("Amplitude A")
-    plt.title("Fit Parameter A vs. Pulse Time (±1σ from Profiled Errors)")
+    plt.title("Amplitude vs. Pulse Time")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
