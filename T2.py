@@ -340,11 +340,7 @@ def main():
     def summarize(series, label):
         mean = series.mean()
         std = series.std()
-        sem = std / np.sqrt(len(series))
-        ci95 = 1.96 * sem
-        print(
-            f"{label}:\n  Mean T2 = {mean:.4f} ms\n  Std = {std:.4f}\n  SEM = {sem:.4f}\n  95% CI = ±{ci95:.4f}\n"
-        )
+        print(f"{label}:\n  Mean T2 = {mean:.4f} ms\n  Std = {std:.4f}")
 
     print("--- CP T2 Results ---")
     summarize(cp_results["T2 (ms)"], "CP CH2")
