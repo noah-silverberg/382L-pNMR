@@ -126,6 +126,7 @@ def main():
     )
     perr1 = np.sqrt(np.diag(pcov1))
     T2_fixed = popt1[-1]
+    T2_fixed_err = perr1[-1]
 
     # map pulse_time → Stage‑1 parameter vector
     guess_by_pt = {
@@ -287,7 +288,7 @@ def main():
     # ------------------------------------------------------------------
     #  Summary and sinusoid peak/trough extraction
     # ------------------------------------------------------------------
-    print(f"Fixed global T2*: {T2_fixed*1e3:.4f} ms (from Stage‑1)")
+    print(f"Fixed global T2* = {T2_fixed*1e3:.4g} ± {T2_fixed_err*1e3:.4g} ms")
     print("Sinusoid parameters [a, f, φ, b, c] =")
     print("  ", ", ".join(f"{v:.4g}" for v in popt_sin))
     print(f"Reduced χ² of sinusoid fit (all repeats): {red_chi2:.3f}")
