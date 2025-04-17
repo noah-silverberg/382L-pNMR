@@ -69,8 +69,8 @@ def main():
     # ------------------------------------------------------------------
     raw_data, pt_list = [], []
     for f in csv_files:
-        pt = int(f.split("_")[0])
-        if pt in [20, 25]:
+        pt = int(f.split("_")[0]) / 2
+        if pt in [10, 12.5]:
             continue
         df = pd.read_csv(
             os.path.join(folder, f), header=None, names=["t", "CH1", "CH2"]
@@ -247,7 +247,7 @@ def main():
     sigma_A = results_df["A_std"].values
     sigma_A[sigma_A == 0] = sigma_A[sigma_A != 0].min()  # protect zeros
 
-    p0_sin = [y_all.max(), 5e-3, 0.0, 0.0, 0.0]
+    p0_sin = [y_all.max(), 1e-2, 0.0, 0.0, 0.0]
     popt_sin, pcov_sin = curve_fit(
         sinusoid_plus_linear,
         x_all,
@@ -264,19 +264,19 @@ def main():
 
     # plot means
     x_plot = np.linspace(
-        group_stats["pulse_time"].min(), group_stats["pulse_time"].max(), 400
+        group_stats["pulse_time"].min(), group_stats["pulse_time"].max(), 1000
     )
     y_plot = sinusoid_plus_linear(x_plot, *popt_sin)
     plt.figure(figsize=(7, 4))
     plt.errorbar(
-        group_stats["pulse_time"] / 2,
+        group_stats["pulse_time"],
         group_stats["A_mean"],
         yerr=group_stats["A_std"],
         fmt="o",
         capsize=4,
         label="Average Amplitude ± σ",
     )
-    plt.plot(x_plot / 2, y_plot, "--", label="Sinusoid + Linear Fit")
+    plt.plot(x_plot, y_plot, "--", label="Sinusoid + Linear Fit")
     plt.xlabel("Pulse time (µs)")
     plt.ylabel("Amplitude  (a.u.)")
     plt.title("Amplitude vs Pulse Time")
@@ -299,31 +299,72 @@ def main():
     )
     y_full = sinusoid_plus_linear(pulse_grid, *popt_sin)
 
-    # Find the peak (maximum) in the region 40-60 µs
-    peak_mask = (pulse_grid >= 40) & (pulse_grid <= 60)
+    # Find the peak (maximum) in the region 20-30 µs
+    peak_mask = (pulse_grid >= 20) & (pulse_grid <= 30)
     if np.any(peak_mask):
         peak_region = y_full[peak_mask]
         peak_indices = np.where(peak_mask)[0]
         peak_idx = peak_indices[np.argmax(peak_region)]
         peak_pulse_time = pulse_grid[peak_idx]
         print(
-            f"Pulse time corresponding to peak in range (40, 60): {peak_pulse_time / 2:.4f} µs"
+            f"Pulse time corresponding to peak in range (20, 30): {peak_pulse_time:.4f} µs"
         )
     else:
-        print("No pulse time in the range (40, 60) µs found for peak.")
+        print("No pulse time in the range (20, 30) µs found for peak.")
 
-    # Find the trough (minimum) in the region 80-100 µs
-    trough_mask = (pulse_grid >= 80) & (pulse_grid <= 100)
+    # Find the trough (minimum) in the region 40-50 µs
+    trough_mask = (pulse_grid >= 40) & (pulse_grid <= 50)
     if np.any(trough_mask):
         trough_region = y_full[trough_mask]
         trough_indices = np.where(trough_mask)[0]
         trough_idx = trough_indices[np.argmin(trough_region)]
         trough_pulse_time = pulse_grid[trough_idx]
         print(
-            f"Pulse time corresponding to trough in range (80, 100): {trough_pulse_time / 2:.4f} µs"
+            f"Pulse time corresponding to trough in range (40, 50): {trough_pulse_time:.4f} µs"
         )
     else:
-        print("No pulse time in the range (80, 100) µs found for trough.")
+        print("No pulse time in the range (40, 50) µs found for trough.")
+
+    # ------------------------------------------------------------------
+    #  Uncertainty on x0 from covariance matrix
+    # ------------------------------------------------------------------
+    def x0_uncertainty(a, f, phi, b, pcov, branch=0):
+        """
+        Return x0 [µs] and its 1‑σ error given a,f,phi,b and their covariance.
+        branch = 0  →  use arccos(k)
+        branch = 1  →  use 2π - arccos(k)   (other extremum)
+        """
+        k = -b / (2 * np.pi * a * f)
+        if np.abs(k) >= 1:
+            raise ValueError("|k| ≥ 1 → no real extremum")
+
+        acos_term = np.arccos(k)
+        if branch == 1:
+            acos_term = 2 * np.pi - acos_term
+
+        x0 = (acos_term - phi) / (2 * np.pi * f)  # seconds
+        # gradient vector [∂g/∂a, ∂g/∂f, ∂g/∂phi, ∂g/∂b, ∂g/∂c]
+        D = np.sqrt(1 - k**2)
+        dg_da = -b / ((2 * np.pi) ** 2 * a**2 * f**2) / D
+        dg_db = 1 / ((2 * np.pi) ** 2 * a * f**2) / D
+        dg_dphi = -1 / (2 * np.pi * f)
+        dg_df = (
+            -(acos_term - phi) / (2 * np.pi * f**2)
+            - b / ((2 * np.pi) ** 2 * a * f**3) / D
+        )
+        grad = np.array([dg_da, dg_df, dg_dphi, dg_db, 0.0])  # dc/dc=0
+        var_x0 = grad @ pcov @ grad
+        sigma_x0 = np.sqrt(var_x0)
+        return x0, sigma_x0  # convert to µs
+
+    # ---------- call it for your two extrema ----------
+    a, f, phi, b, c = popt_sin
+    # choose branch so result is nearest to the grid-based peak/trough you found
+    pi_by2_time, pi_by2_err = x0_uncertainty(a, f, phi, b, pcov_sin, branch=0)
+    pi_time, pi_err = x0_uncertainty(a, f, phi, b, pcov_sin, branch=1)
+
+    print(f"π/2 pulse  = {pi_by2_time:.4f} ± {pi_by2_err:.4f} µs")
+    print(f"π   pulse  = {pi_time:.4f} ± {pi_err:.4f} µs")
 
     # save CSVs
     results_df.to_csv("fit_results_individual.csv", index=False)
