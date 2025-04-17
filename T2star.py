@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """
-sample_mass_T2star.py          – rev‑5
-• Fit & plots use band‑pass–filtered data only
-• For each mass: **save covariance‑matrix heat‑map** of fitted parameters
+sample_mass_T2star.py          – rev‑6
+• No constant offsets (C_real, C_imag) are fit – filtered data are zero‑mean
+• Per‑repeat parameters are now [A, f, φ] only
+• Correlation‑matrix heat‑map adjusted to new parameter set
 2025‑04‑17
 """
 
@@ -20,27 +21,30 @@ from scipy.optimize import curve_fit
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Model helpers
+#  Model helpers (no constant offsets)
 # ═════════════════════════════════════════════════════════════════════════════
-def model_complex(t, A, T2star, f, phi, C_real, C_imag):
-    return A * np.exp(-t / T2star) * np.exp(1j * (2 * np.pi * f * t + phi)) + (
-        C_real + 1j * C_imag
-    )
+def model_complex(t, A, T2star, f, phi):
+    """A · exp(−t/T2*) · exp(i(2πft+φ))"""
+    return A * np.exp(-t / T2star) * np.exp(1j * (2 * np.pi * f * t + phi))
 
 
 def composite_model(dummy_x, *params, group_t_list):
+    """
+    Concatenate real & imag parts of all repeats.
+    Parameter vector = [A0, f0, φ0,  A1, f1, φ1, …,  T2star]
+    """
     n_rep = len(group_t_list)
     T2star = params[-1]
     out = []
     for i in range(n_rep):
-        A, f, phi, Cre, Cim = params[5 * i : 5 * i + 5]
-        sig = model_complex(group_t_list[i], A, T2star, f, phi, Cre, Cim)
+        A, f, phi = params[3 * i : 3 * i + 3]
+        sig = model_complex(group_t_list[i], A, T2star, f, phi)
         out.append(np.concatenate((sig.real, sig.imag)))
     return np.concatenate(out)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Helper functions for p0 estimation
+#  Helper functions for initial guesses
 # ═════════════════════════════════════════════════════════════════════════════
 def guess_frequency(sig, t):
     dt = np.median(np.diff(t))
@@ -79,99 +83,81 @@ def main():
         df = df[df.t < 0.0023]
         grouped[mc].append(df)
 
-    # Butterworth (1–5 kHz) band‑pass
+    # 1–5 kHz Butterworth band‑pass
     b_bp, a_bp = butter(3, [1_000, 5_000], btype="bandpass", fs=1_000_000)
 
     results = []
     for mc in sorted(grouped):
-        # ------------------------------------------------------------------
-        #  Prepare filtered signals
-        # ------------------------------------------------------------------
+        # ---------- filter signals ----------
         filt_sigs, t_list = [], []
         for df in grouped[mc]:
             t = df.t.values
-            raw = df.CH1.values + 1j * df.CH2.values
-            filt = filtfilt(b_bp, a_bp, raw)
+            filt = filtfilt(b_bp, a_bp, df.CH1.values + 1j * df.CH2.values)
             t_list.append(t)
             filt_sigs.append(filt)
         filt_sigs = np.asarray(filt_sigs)
         n_rep = filt_sigs.shape[0]
 
-        # ------------------------------------------------------------------
-        #  Build σ and y‑vector
-        # ------------------------------------------------------------------
+        # ---------- build y‑vector & σ ----------
         std_real = filt_sigs.real.std(axis=0, ddof=1)
         std_imag = filt_sigs.imag.std(axis=0, ddof=1)
         sigma_vec = np.tile(np.concatenate((std_real, std_imag)), n_rep)
         sigma_vec[sigma_vec == 0] = sigma_vec[sigma_vec > 0].min()
         ydata = np.concatenate([np.concatenate((s.real, s.imag)) for s in filt_sigs])
 
-        # ------------------------------------------------------------------
-        #  Initial guess
-        # ------------------------------------------------------------------
+        # ---------- initial guess ----------
         p0, t2_guesses = [], []
         for s, t in zip(filt_sigs, t_list):
             amp0 = 0.5 * (np.abs(s).max() - np.abs(s).min())
             f0 = -2200.0
-            phi0 = np.angle(s[0])
+            phi0 = 3 * np.pi / 4
             env = np.abs(hilbert(s.real))
-            t2_est = 12e-4
+            t2_est = 5e-4
             if t2_est:
                 t2_guesses.append(t2_est)
-            p0.extend([amp0, f0, phi0, 0.0, 0.0])
+            p0.extend([amp0, f0, phi0])
         p0.append(np.median(t2_guesses) if t2_guesses else 5e-4)
 
-        # ------------------------------------------------------------------
-        #  Fit
-        # ------------------------------------------------------------------
+        # ---------- fit ----------
         popt, pcov = curve_fit(
             lambda x, *p: composite_model(x, *p, group_t_list=t_list),
             None,
             ydata,
             p0=p0,
-            sigma=sigma_vec,
-            absolute_sigma=True,
+            # sigma=sigma_vec,
+            # absolute_sigma=True,
             maxfev=60_000,
         )
         T2star, T2err = popt[-1], np.sqrt(np.diag(pcov))[-1]
         results.append(dict(mass_g=mc / 100, T2star=T2star, T2star_err=T2err))
 
-        # ------------------------------------------------------------------
-        #  Correlation‑matrix heat‑map  (ρ = Cov/σᵢσⱼ)
-        # ------------------------------------------------------------------
-        # Build parameter labels:  A0,f0,φ0,C_re0,C_im0, … , T2*
-        labels = []
-        for i in range(n_rep):
-            labels += [f"A{i}", f"f{i}", f"φ{i}", f"C_re{i}", f"C_im{i}"]
+        # ---------- correlation‑matrix heat‑map ----------
+        labels = [lbl for i in range(n_rep) for lbl in (f"A{i}", f"f{i}", f"φ{i}")]
         labels.append("T2*")
-
-        # convert covariance → correlation
-        sig = np.sqrt(np.diag(pcov))
-        corr = pcov / np.outer(sig, sig)
-        corr[np.isnan(corr)] = 0.0  # protect against divide‑by‑zero
-
-        fig_corr, ax_corr = plt.subplots(figsize=(6, 5))
+        sigs = np.sqrt(np.diag(pcov))
+        corr = pcov / np.outer(sigs, sigs)
+        corr[np.isnan(corr)] = 0.0
+        fig_corr, ax_corr = plt.subplots(figsize=(5.5, 4.5))
         im = ax_corr.imshow(corr, cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
         ax_corr.set_xticks(range(len(labels)))
         ax_corr.set_yticks(range(len(labels)))
         ax_corr.set_xticklabels(labels, rotation=90, fontsize=7)
         ax_corr.set_yticklabels(labels, fontsize=7)
         ax_corr.set_title(f"Correlation matrix – mass {mc/100:.2f} g")
-        cbar = plt.colorbar(im, ax=ax_corr, fraction=0.046, pad=0.04)
-        cbar.ax.set_ylabel("ρ", rotation=0, labelpad=10)
+        plt.colorbar(im, ax=ax_corr, fraction=0.046, pad=0.04).ax.set_ylabel(
+            "ρ", rotation=0, labelpad=10
+        )
         plt.tight_layout()
         plt.savefig(f"corrmat_mass_{mc:02d}.png")
         plt.close(fig_corr)
 
-        # ------------------------------------------------------------------
-        #  Diagnostic fit plots (filtered data only)
-        # ------------------------------------------------------------------
+        # ---------- diagnostic plots ----------
         colors = plt.cm.tab10.colors
         fig, axs = plt.subplots(n_rep, 2, figsize=(10, 3 * n_rep), sharex=True)
         axs = np.atleast_2d(axs)
         for i in range(n_rep):
-            A, f, phi, Cre, Cim = popt[5 * i : 5 * i + 5]
-            fit = model_complex(t_list[i], A, T2star, f, phi, Cre, Cim)
+            A, f, phi = popt[3 * i : 3 * i + 3]
+            fit = model_complex(t_list[i], A, T2star, f, phi)
             # real
             axs[i, 0].fill_between(
                 t_list[i],
@@ -215,7 +201,6 @@ def main():
                 t_list[i], fit.imag, "--", lw=1.2, color=colors[i % 10], label="Fit"
             )
             axs[i, 1].legend(fontsize=7, loc="upper right")
-
         axs[-1, 0].set_xlabel("Time (s)")
         axs[-1, 1].set_xlabel("Time (s)")
         plt.suptitle(
@@ -231,9 +216,7 @@ def main():
             f"{mc/100:.2f} g:  T2* = {T2star*1e3:.3f} ± {T2err*1e3:.3f} ms  (n={n_rep})"
         )
 
-    # ------------------------------------------------------------------
-    #  Aggregate mass‑dependence plot
-    # ------------------------------------------------------------------
+    # ---------- mass‑dependence ----------
     res = pd.DataFrame(results).sort_values("mass_g")
     res.to_csv("t2star_vs_mass.csv", index=False)
     plt.figure(figsize=(7, 4))
