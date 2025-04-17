@@ -46,7 +46,7 @@ from scipy.optimize import curve_fit
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ------------------- USER TOGGLE HERE -------------------
-SIGN_MODE = "plus"  # choose "plus" or "minus"
+SIGN_MODE = "minus"  # choose "plus" or "minus"
 # --------------------------------------------------------
 
 
@@ -387,6 +387,64 @@ def main():
     max_x, max_y = find_max_sinusoid_plus_linear(popt_sine, x_fit)
     print("Sinusoid plus linear fit results:")
     print(f"Peak (Pi/2 pulse) at: {max_x:.4f} us, amplitude = {max_y:.4f}")
+
+    # ------------------------------------------------------------------
+    #  Error on peak (π/2) pulse time via analytic error propagation
+    # ------------------------------------------------------------------
+    def x0_uncertainty(a, f, phi, b, pcov, peak_x):
+        """
+        Return (x0, σ_x0) with x0 in µs.
+
+        Model:  y = a·sin(2π f x + φ) + b x + c
+        Extremum satisfies dy/dx = 0  ⇒  cos(2π f x0 + φ) = k
+            k = -b / (2π a f)
+
+        Choose the branch (arccos or 2π‑arccos) that matches the peak_x
+        already found on a dense grid.
+        """
+        k = -b / (2 * np.pi * a * f)
+        if np.abs(k) >= 1:
+            raise ValueError("|k| ≥ 1 → no real extremum")
+
+        # Two mathematical solutions for x0:
+        acos_term0 = np.arccos(k)
+        acos_term1 = 2 * np.pi - acos_term0
+        cand0 = (acos_term0 - phi) / (2 * np.pi * f)
+        cand1 = (acos_term1 - phi) / (2 * np.pi * f)
+        # Pick whichever is closer to the peak we already located
+        x0 = cand0 if abs(cand0 - peak_x) < abs(cand1 - peak_x) else cand1
+        acos_term = acos_term0 if x0 is cand0 else acos_term1
+
+        # gradient components ∂x0/∂parameter
+        D = np.sqrt(1 - k**2)
+        dg_da = -b / ((2 * np.pi) ** 2 * a**2 * f**2) / D
+        dg_db = 1 / ((2 * np.pi) ** 2 * a * f**2) / D
+        dg_dphi = -1 / (2 * np.pi * f)
+        dg_df = (
+            -(acos_term - phi) / (2 * np.pi * f**2)
+            - b / ((2 * np.pi) ** 2 * a * f**3) / D
+        )
+        grad = np.array([dg_da, dg_df, dg_dphi, dg_db, 0.0])  # no c‑dependence
+
+        var_x0 = grad @ pcov @ grad
+        sig_x0 = np.sqrt(var_x0)
+        return x0, sig_x0
+
+    # parameters & covariance from the fit
+    a, f, phi, b, c = popt_sine
+    x0_peak, sx_peak = x0_uncertainty(a, f, phi, b, pcov_sine, max_x)
+
+    print(
+        f"π/2 pulse (from error propagation) : "
+        f"{x0_peak:.4f} ± {sx_peak:.4f} µs  (1 σ)"
+    )
+
+    a, f, phi, b, c = popt_sine
+    k = -b / (2 * np.pi * a * f)
+    print(f"\nFitted parameters (sign={SIGN_MODE}):")
+    print(f"a={a:.3g}, f={f:.3g}, phi={phi:.3g}, b={b:.3g}, c={c:.3g}")
+    print(f"k = -b/(2πaf) = {k:.4f}   (|k|→1 ⇒ D→0 ⇒ huge σ)")
+    print("diag(pcov) =", np.round(np.diag(pcov_sine), 3))
 
 
 if __name__ == "__main__":
