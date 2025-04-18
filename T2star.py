@@ -1,9 +1,16 @@
 #!/usr/bin/env python
 """
-sample_mass_T2star.py          – rev‑6
-• No constant offsets (C_real, C_imag) are fit – filtered data are zero‑mean
-• Per‑repeat parameters are now [A, f, φ] only
-• Correlation‑matrix heat‑map adjusted to new parameter set
+sample_mass_T2star_peaks.py      – rev‑1
+Fit *only the peak envelope* of each (Real / Imag) trace to a shared
+exponential decay:
+
+    peak(t) ≃ A_trace · exp(−t / T2*)
+
+* band‑pass (1–5 kHz) → Gaussian smooth → peak detection
+* simultaneous fit of all peak trains (own A, common T2*)
+* diagnostics: filtered trace + peaks + fitted envelope
+* summary: T2* versus sample mass
+
 2025‑04‑17
 """
 
@@ -16,219 +23,171 @@ import matplotlib.pyplot as plt
 
 plt.style.use("seaborn-v0_8-whitegrid")
 
-from scipy.signal import butter, filtfilt, hilbert
+from scipy.signal import butter, filtfilt, find_peaks
+from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import curve_fit
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Model helpers (no constant offsets)
+#  Helper functions
 # ═════════════════════════════════════════════════════════════════════════════
-def model_complex(t, A, T2star, f, phi):
-    """A · exp(−t/T2*) · exp(i(2πft+φ))"""
-    return A * np.exp(-t / T2star) * np.exp(1j * (2 * np.pi * f * t + phi))
+def exp_decay(t, A, T2):
+    return A * np.exp(-t / T2)
 
 
-def composite_model(dummy_x, *params, group_t_list):
+def composite_peaks(dummy_x, *params, peak_t_list):
     """
-    Concatenate real & imag parts of all repeats.
-    Parameter vector = [A0, f0, φ0,  A1, f1, φ1, …,  T2star]
+    Concatenate the model for every peak train.
+    params = [A0, A1, ..., A_(n‑1), T2]
     """
-    n_rep = len(group_t_list)
-    T2star = params[-1]
+    n_tr = len(peak_t_list)
+    T2 = params[-1]
     out = []
-    for i in range(n_rep):
-        A, f, phi = params[3 * i : 3 * i + 3]
-        sig = model_complex(group_t_list[i], A, T2star, f, phi)
-        out.append(np.concatenate((sig.real, sig.imag)))
+    for i in range(n_tr):
+        A = params[i]
+        out.append(exp_decay(peak_t_list[i], A, T2))
     return np.concatenate(out)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  Helper functions for initial guesses
-# ═════════════════════════════════════════════════════════════════════════════
-def guess_frequency(sig, t):
-    dt = np.median(np.diff(t))
-    f_axis = np.fft.rfftfreq(len(sig), d=dt)
-    spectrum = np.abs(np.fft.rfft(sig.real - sig.real.mean()))
-    return -f_axis[np.argmax(spectrum[1:]) + 1]
-
-
-def guess_T2star(envelope, t):
-    mask = envelope > 0
-    env, t_sel = envelope[mask], t[mask]
-    n = max(10, int(0.3 * len(env)))
-    if len(env[:n]) < 2:
-        return None
-    slope, _ = np.polyfit(t_sel[:n], np.log(env[:n]), 1)
-    return -1 / slope if slope < 0 else None
+def detect_peaks(y, prominence):
+    idx, _ = find_peaks(y, prominence=prominence)
+    return idx
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Main analysis
+#  Main
 # ═════════════════════════════════════════════════════════════════════════════
 def main():
-    folder = "4-17-25"
-    pat = re.compile(r"^(\d+)_(\d+)\.csv$")
+    folder = "4-17-25/rapid"  # data directory
+    pat = re.compile(r"^(\d+)_(\d+)\.csv$")  # 37_0.csv → mass 0.37 g
     files = [f for f in os.listdir(folder) if pat.match(f)]
     if not files:
         raise RuntimeError("No CSV files found")
 
+    # group files by sample mass code
     grouped = defaultdict(list)
     for fn in files:
         mc = int(pat.match(fn).group(1))
         df = pd.read_csv(
             os.path.join(folder, fn), header=None, names=["t", "CH1", "CH2"]
-        )
-        df = df.dropna()
-        df = df[df.t < 0.0023]
+        ).dropna()
+        df = df[(df.t > 0.0008) & (df.t < 0.0028)]  # crop trailing junk
         grouped[mc].append(df)
 
     # 1–5 kHz Butterworth band‑pass
-    b_bp, a_bp = butter(3, [1_000, 5_000], btype="bandpass", fs=1_000_000)
+    b_bp, a_bp = butter(3, [5_000, 20_000], btype="bandpass", fs=1_000_000)
 
     results = []
     for mc in sorted(grouped):
-        # ---------- filter signals ----------
-        filt_sigs, t_list = [], []
-        for df in grouped[mc]:
+        peak_t_list, peak_y_list = [], []  # per‑trace peak data
+        trace_labels = []  # for plotting
+        diagnostics = []  # (t, filt_sig, peaks_t, peaks_y, fit_env)
+
+        # ----------- preprocess each trace (Real & Imag) -----------
+        for rep, df in enumerate(grouped[mc]):
             t = df.t.values
-            filt = filtfilt(b_bp, a_bp, df.CH1.values + 1j * df.CH2.values)
-            t_list.append(t)
-            filt_sigs.append(filt)
-        filt_sigs = np.asarray(filt_sigs)
-        n_rep = filt_sigs.shape[0]
+            complex_sig = filtfilt(b_bp, a_bp, df.CH1.values + 1j * df.CH2.values)
 
-        # ---------- build y‑vector & σ ----------
-        std_real = filt_sigs.real.std(axis=0, ddof=1)
-        std_imag = filt_sigs.imag.std(axis=0, ddof=1)
-        sigma_vec = np.tile(np.concatenate((std_real, std_imag)), n_rep)
-        sigma_vec[sigma_vec == 0] = sigma_vec[sigma_vec > 0].min()
-        ydata = np.concatenate([np.concatenate((s.real, s.imag)) for s in filt_sigs])
+            for comp, comp_name in zip(
+                (complex_sig.real, complex_sig.imag), ("Real", "Imag")
+            ):
+                # smooth to suppress noise before peak finding
+                sm = gaussian_filter1d(comp, sigma=5)
+                # dynamic prominence: 20 % of smoothed p‑to‑p
+                prom = 0.02 * (sm.max() - sm.min())
+                peak_idx = detect_peaks(sm, prominence=prom)
+                if len(peak_idx) < 3:  # skip traces with too few peaks
+                    continue
+                peak_t = t[peak_idx]
+                peak_y = np.abs(comp[peak_idx])
 
-        # ---------- initial guess ----------
-        p0, t2_guesses = [], []
-        for s, t in zip(filt_sigs, t_list):
-            amp0 = 0.5 * (np.abs(s).max() - np.abs(s).min())
-            f0 = -2200.0
-            phi0 = 3 * np.pi / 4
-            env = np.abs(hilbert(s.real))
-            t2_est = 5e-4
-            if t2_est:
-                t2_guesses.append(t2_est)
-            p0.extend([amp0, f0, phi0])
-        p0.append(np.median(t2_guesses) if t2_guesses else 5e-4)
+                peak_t_list.append(peak_t)
+                peak_y_list.append(peak_y)
+                trace_labels.append(f"{comp_name} rep{rep}")
 
-        # ---------- fit ----------
+                diagnostics.append((t, comp, peak_t, peak_y, None))  # fit_env later
+
+        n_tr = len(peak_t_list)
+        if n_tr == 0:
+            print(f"{mc/100:.2f} g: no usable peaks, skipping.")
+            continue
+
+        # ----------- build global fit arrays -----------
+        ydata = np.concatenate(peak_y_list)
+        sigma = None  # un‑weighted fit; could supply np.sqrt(y) as Poisson weights
+        p0 = []  # amplitude guesses
+        for py in peak_y_list:
+            p0.append(py[0])  # first peak amplitude
+        p0.append(5e-4)  # T2* initial 0.5 ms
+
+        # ----------- simultaneous fit -----------
         popt, pcov = curve_fit(
-            lambda x, *p: composite_model(x, *p, group_t_list=t_list),
+            lambda x, *p: composite_peaks(x, *p, peak_t_list=peak_t_list),
             None,
             ydata,
             p0=p0,
-            # sigma=sigma_vec,
-            # absolute_sigma=True,
-            maxfev=60_000,
+            sigma=sigma,
+            maxfev=40000,
         )
-        T2star, T2err = popt[-1], np.sqrt(np.diag(pcov))[-1]
+        T2star = popt[-1]
+        T2err = np.sqrt(np.diag(pcov))[-1] if np.isfinite(pcov).all() else np.nan
         results.append(dict(mass_g=mc / 100, T2star=T2star, T2star_err=T2err))
 
-        # ---------- correlation‑matrix heat‑map ----------
-        labels = [lbl for i in range(n_rep) for lbl in (f"A{i}", f"f{i}", f"φ{i}")]
-        labels.append("T2*")
-        sigs = np.sqrt(np.diag(pcov))
-        corr = pcov / np.outer(sigs, sigs)
-        corr[np.isnan(corr)] = 0.0
-        fig_corr, ax_corr = plt.subplots(figsize=(5.5, 4.5))
-        im = ax_corr.imshow(corr, cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
-        ax_corr.set_xticks(range(len(labels)))
-        ax_corr.set_yticks(range(len(labels)))
-        ax_corr.set_xticklabels(labels, rotation=90, fontsize=7)
-        ax_corr.set_yticklabels(labels, fontsize=7)
-        ax_corr.set_title(f"Correlation matrix – mass {mc/100:.2f} g")
-        plt.colorbar(im, ax=ax_corr, fraction=0.046, pad=0.04).ax.set_ylabel(
-            "ρ", rotation=0, labelpad=10
-        )
-        plt.tight_layout()
-        plt.savefig(f"corrmat_mass_{mc:02d}.png")
-        plt.close(fig_corr)
-
-        # ---------- diagnostic plots ----------
+        # ----------- diagnostics plots -----------
         colors = plt.cm.tab10.colors
-        fig, axs = plt.subplots(n_rep, 2, figsize=(10, 3 * n_rep), sharex=True)
-        axs = np.atleast_2d(axs)
-        for i in range(n_rep):
-            A, f, phi = popt[3 * i : 3 * i + 3]
-            fit = model_complex(t_list[i], A, T2star, f, phi)
-            # real
-            axs[i, 0].fill_between(
-                t_list[i],
-                filt_sigs[i].real - std_real,
-                filt_sigs[i].real + std_real,
-                color=colors[i % 10],
-                alpha=0.15,
-                label="±σ",
-            )
-            axs[i, 0].plot(
-                t_list[i],
-                filt_sigs[i].real,
-                ".",
-                ms=2,
-                color=colors[i % 10],
-                label="Data",
-            )
-            axs[i, 0].plot(
-                t_list[i], fit.real, "--", lw=1.2, color=colors[i % 10], label="Fit"
-            )
-            axs[i, 0].set_ylabel("Signal (a.u.)")
-            axs[i, 0].legend(fontsize=7, loc="upper right")
-            # imag
-            axs[i, 1].fill_between(
-                t_list[i],
-                filt_sigs[i].imag - std_imag,
-                filt_sigs[i].imag + std_imag,
-                color=colors[i % 10],
-                alpha=0.15,
-                label="±σ",
-            )
-            axs[i, 1].plot(
-                t_list[i],
-                filt_sigs[i].imag,
-                ".",
-                ms=2,
-                color=colors[i % 10],
-                label="Data",
-            )
-            axs[i, 1].plot(
-                t_list[i], fit.imag, "--", lw=1.2, color=colors[i % 10], label="Fit"
-            )
-            axs[i, 1].legend(fontsize=7, loc="upper right")
-        axs[-1, 0].set_xlabel("Time (s)")
-        axs[-1, 1].set_xlabel("Time (s)")
+        for i, (t_vec, comp_sig, p_t, p_y, _) in enumerate(diagnostics):
+            A_i = popt[i]
+            fit_env = exp_decay(t_vec, A_i, T2star)
+            diagnostics[i] = (t_vec, comp_sig, p_t, p_y, fit_env)
+
+        rows = len(diagnostics)
+        fig, axs = plt.subplots(rows, 1, figsize=(10, 2.5 * rows), sharex=True)
+        if rows == 1:
+            axs = [axs]
+        for ax, diag, lbl in zip(axs, diagnostics, trace_labels):
+            t_vec, sig_vec, p_t, p_y, env = diag
+            ax.plot(t_vec, sig_vec, lw=0.8, color="0.3")
+            ax.plot(p_t, p_y, "o", ms=4, label="Peaks")
+            ax.plot(t_vec, env, "--", lw=1.2, label="Fit envelope")
+            ax.set_ylabel("Signal (a.u.)")
+            ax.set_title(lbl)
+            ax.legend(fontsize=8)
+        axs[-1].set_xlabel("Time (s)")
         plt.suptitle(
-            rf"Mass {mc/100:.2f} g  –  $T_2^* = {T2star*1e3:.3f}\pm{T2err*1e3:.3f}$ ms",
+            rf"Mass {mc/100:.2f} g – $T_2^*={T2star*1e3:.3f}\pm"
+            f"{(T2err*1e3 if np.isfinite(T2err) else np.nan):.3g}$ ms",
             y=1.02,
-            fontsize=14,
+            fontsize=13,
         )
         plt.tight_layout()
-        plt.savefig(f"t2star_fit_mass_{mc:02d}.png")
+        plt.savefig(f"peaks_fit_mass_{mc:02d}.png")
         plt.close()
 
         print(
-            f"{mc/100:.2f} g:  T2* = {T2star*1e3:.3f} ± {T2err*1e3:.3f} ms  (n={n_rep})"
+            f"{mc/100:.2f} g:  T2* = {T2star*1e3:.3f} ± "
+            f"{(T2err*1e3 if np.isfinite(T2err) else np.nan):.3g} ms"
         )
 
-    # ---------- mass‑dependence ----------
-    res = pd.DataFrame(results).sort_values("mass_g")
-    res.to_csv("t2star_vs_mass.csv", index=False)
-    plt.figure(figsize=(7, 4))
-    plt.errorbar(
-        res.mass_g, res.T2star * 1e3, yerr=res.T2star_err * 1e3, fmt="o", capsize=4
-    )
-    plt.xlabel("Sample mass (g)")
-    plt.ylabel(r"$T_2^{\!*}$ (ms)")
-    plt.title(r"$T_2^{\!*}$ vs Sample Mass")
-    plt.tight_layout()
-    plt.savefig("T2star_vs_sample_mass.png")
-    plt.close()
+    # ----------- mass‑dependence summary -----------
+    if results:
+        res_df = pd.DataFrame(results).sort_values("mass_g")
+        res_df.to_csv("t2star_vs_mass.csv", index=False)
+        plt.figure(figsize=(7, 4))
+        plt.errorbar(
+            res_df.mass_g,
+            res_df.T2star * 1e3,
+            yerr=res_df.T2star_err * 1e3,
+            fmt="o",
+            capsize=4,
+        )
+        plt.xlabel("Sample mass (g)")
+        plt.ylabel(r"$T_2^{\!*}$ (ms)")
+        plt.title(r"$T_2^{\!*}$ vs Sample Mass")
+        plt.tight_layout()
+        plt.savefig("T2star_vs_sample_mass.png")
+        plt.close()
+    else:
+        print("No valid fits produced.")
 
 
 if __name__ == "__main__":
