@@ -46,7 +46,7 @@ from scipy.optimize import curve_fit
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ------------------- USER TOGGLE HERE -------------------
-SIGN_MODE = "minus"  # choose "plus" or "minus"
+SIGN_MODE = "plus"  # choose "plus" or "minus"
 # --------------------------------------------------------
 
 
@@ -84,33 +84,16 @@ def model_simultaneous(dummy_x, *params, group_t_list):
     return np.concatenate(out)
 
 
-def sinusoid_plus_linear(x, a, f, phi, b, c):
-    """
-    Model: a*sin(2π*f*x + phi) + (b*x + c)
-    Used to fit amplitude vs. pulse time.
-    """
-    return a * np.sin(2 * np.pi * f * x + phi) + (b * x) + c
+def sinusoid_const(x, a, f, phi, c):
+    """a·sin(2π f x + φ) + c   (no linear‑in‑x term)"""
+    return a * np.sin(2 * np.pi * f * x + phi) + c
 
 
-def find_max_sinusoid_plus_linear(popt, x_fit):
-    """
-    Finds the maximum of the sinusoid_plus_linear fit.
-    """
-    a, f, phi, b, c = popt
-    x = np.linspace(np.min(x_fit), np.max(x_fit), 10000)
-    y = sinusoid_plus_linear(x, a, f, phi, b, c)
-    idx = np.argmax(y)
-    return x[idx], y[idx]
-
-
-def find_min_sinusoid_plus_linear(popt, x_fit):
-    """
-    Finds the minimum of the sinusoid_plus_linear fit.
-    """
-    a, f, phi, b, c = popt
-    x = np.linspace(np.min(x_fit), np.max(x_fit), 10000)
-    y = sinusoid_plus_linear(x, a, f, phi, b, c)
-    idx = np.argmin(y)
+def find_peak_of_sinusoid(popt, x_rng, is_max=True):
+    """Locate peak (is_max=True) or trough (False) on a dense grid."""
+    x = np.linspace(x_rng.min(), x_rng.max(), 10_000)
+    y = sinusoid_const(x, *popt)
+    idx = np.argmax(y) if is_max else np.argmin(y)
     return x[idx], y[idx]
 
 
@@ -328,33 +311,38 @@ def main():
     # ----- SINUSOID PLUS LINEAR FIT TO AMPLITUDE vs. PULSE TIME -----
     # Use the summary results from the simultaneous fit.
     # In this script we model A vs. pulse time with: a*sin(2π*f*x+phi) + (b*x+c)
-    p0_sine = [3, 5e-3, 0, 1e-5, 1e-2]  # initial guess: [a, f, phi, b, c]
+    p0_sine = [
+        results_df["A"].max(),  # a
+        5e-3,  # f  (≈ 0.005 µs⁻¹  → 200 µs period)
+        0.0,  # φ
+        results_df["A"].mean(),
+    ]  # c
+
     try:
-        # ----- Sinusoid-plus-linear fit using the extracted amplitudes -----
-        p0_sine = [3, 5e-3, 0, 1e-5, 1e-2]  # initial guess: [a, f, phi, b, c]
-        all_pulse_time_vals = np.array(all_pulse_time_vals)
-        all_A_vals = np.array(all_A_vals)
-        all_A_sigma = np.array(all_A_sigma)
+        all_pulse_time_vals = np.asarray(all_pulse_time_vals)
+        all_A_vals = np.asarray(all_A_vals)
+        all_A_sigma = np.asarray(all_A_sigma)
 
         popt_sine, pcov_sine = curve_fit(
-            sinusoid_plus_linear,
+            sinusoid_const,
             all_pulse_time_vals,
             all_A_vals,
             p0=p0_sine,
-            maxfev=100000,
             sigma=all_A_sigma,
             absolute_sigma=True,
+            maxfev=100_000,
         )
 
     except RuntimeError:
         print("Sinusoid fit failed.")
         return
 
-    print("Sinusoid plus linear fit parameters:", popt_sine)
+    print("Sinusoid fit parameters:", popt_sine)
     x_fit = np.linspace(
-        results_df["Pulse Time (us)"].min(), results_df["Pulse Time (us)"].max(), 200
+        results_df["Pulse Time (us)"].min(), results_df["Pulse Time (us)"].max(), 400
     )
-    y_fit = sinusoid_plus_linear(x_fit, *popt_sine)
+    y_fit = sinusoid_const(x_fit, *popt_sine)
+
     plt.figure(figsize=(8, 5))
     plt.errorbar(
         results_df["Pulse Time (us)"],
@@ -362,10 +350,9 @@ def main():
         yerr=results_df["A_err"],
         fmt="o",
         capsize=4,
-        label="Data (with σ)",
+        label="Data (±σ)",
     )
-
-    plt.plot(x_fit, y_fit, "--", label="Sinusoid + Linear Fit")
+    plt.plot(x_fit, y_fit, "--", label="Sinusoid Fit")
     plt.xlabel("Pulse Time (μs)")
     plt.ylabel("Amplitude (a.u.)")
     plt.title("Amplitude vs Pulse Time")
@@ -376,7 +363,7 @@ def main():
     plt.close()
 
     # Compute reduced chi-square for the sinusoid fit.
-    fitted_all = sinusoid_plus_linear(all_pulse_time_vals, *popt_sine)
+    fitted_all = sinusoid_const(all_pulse_time_vals, *popt_sine)
     residuals = all_A_vals - fitted_all
     chi_sq = np.sum((residuals / all_A_sigma) ** 2)
     dof = len(all_A_vals) - len(popt_sine)
@@ -384,67 +371,36 @@ def main():
     print(f"Reduced chi-square for sinusoid fit: {reduced_chi_sq:.4f}")
 
     # Find maximum and minimum.
-    max_x, max_y = find_max_sinusoid_plus_linear(popt_sine, x_fit)
+    max_x, max_y = find_peak_of_sinusoid(popt_sine, x_fit)
     print("Sinusoid plus linear fit results:")
-    print(f"Peak (Pi/2 pulse) at: {max_x:.4f} us, amplitude = {max_y:.4f}")
+    print(f"Peak (Pi pulse) at: {max_x:.4f} us, amplitude = {max_y:.4f}")
 
     # ------------------------------------------------------------------
     #  Error on peak (π/2) pulse time via analytic error propagation
     # ------------------------------------------------------------------
-    def x0_uncertainty(a, f, phi, b, pcov, peak_x):
+    def x0_error(a, f, phi, c, pcov, branch=+1):
         """
-        Return (x0, σ_x0) with x0 in µs.
-
-        Model:  y = a·sin(2π f x + φ) + b x + c
-        Extremum satisfies dy/dx = 0  ⇒  cos(2π f x0 + φ) = k
-            k = -b / (2π a f)
-
-        Choose the branch (arccos or 2π‑arccos) that matches the peak_x
-        already found on a dense grid.
+        branch = +1 for peak  (π/2),  branch = -1 for trough (-π/2).
+        Returns (x0 [µs], σ_x0 [µs]).
         """
-        k = -b / (2 * np.pi * a * f)
-        if np.abs(k) >= 1:
-            raise ValueError("|k| ≥ 1 → no real extremum")
+        x0 = (branch * np.pi / 2 - phi) / (2 * np.pi * f)  # seconds
+        # gradient w.r.t [a, f, phi, c]
+        dfd = -(branch * np.pi / 2 - phi) / (2 * np.pi * f**2)
+        dph = -1 / (2 * np.pi * f)
+        grad = np.array([0.0, dfd, dph, 0.0])
+        var = grad @ pcov @ grad
+        sig = np.sqrt(var)
+        return x0, sig  # → µs
 
-        # Two mathematical solutions for x0:
-        acos_term0 = np.arccos(k)
-        acos_term1 = 2 * np.pi - acos_term0
-        cand0 = (acos_term0 - phi) / (2 * np.pi * f)
-        cand1 = (acos_term1 - phi) / (2 * np.pi * f)
-        # Pick whichever is closer to the peak we already located
-        x0 = cand0 if abs(cand0 - peak_x) < abs(cand1 - peak_x) else cand1
-        acos_term = acos_term0 if x0 is cand0 else acos_term1
+    a, f, phi, c = popt_sine
+    peak_x, peak_err = x0_error(a, f, phi, c, pcov_sine, branch=+1)
 
-        # gradient components ∂x0/∂parameter
-        D = np.sqrt(1 - k**2)
-        dg_da = -b / ((2 * np.pi) ** 2 * a**2 * f**2) / D
-        dg_db = 1 / ((2 * np.pi) ** 2 * a * f**2) / D
-        dg_dphi = -1 / (2 * np.pi * f)
-        dg_df = (
-            -(acos_term - phi) / (2 * np.pi * f**2)
-            - b / ((2 * np.pi) ** 2 * a * f**3) / D
-        )
-        grad = np.array([dg_da, dg_df, dg_dphi, dg_db, 0.0])  # no c‑dependence
+    print(f"π pulse  : {peak_x:.4f} ± {peak_err:.4f} µs (1 σ)")
 
-        var_x0 = grad @ pcov @ grad
-        sig_x0 = np.sqrt(var_x0)
-        return x0, sig_x0
-
-    # parameters & covariance from the fit
-    a, f, phi, b, c = popt_sine
-    x0_peak, sx_peak = x0_uncertainty(a, f, phi, b, pcov_sine, max_x)
-
-    print(
-        f"π/2 pulse (from error propagation) : "
-        f"{x0_peak:.4f} ± {sx_peak:.4f} µs  (1 σ)"
-    )
-
-    a, f, phi, b, c = popt_sine
-    k = -b / (2 * np.pi * a * f)
-    print(f"\nFitted parameters (sign={SIGN_MODE}):")
-    print(f"a={a:.3g}, f={f:.3g}, phi={phi:.3g}, b={b:.3g}, c={c:.3g}")
-    print(f"k = -b/(2πaf) = {k:.4f}   (|k|→1 ⇒ D→0 ⇒ huge σ)")
-    print("diag(pcov) =", np.round(np.diag(pcov_sine), 3))
+    residuals = all_A_vals - sinusoid_const(all_pulse_time_vals, *popt_sine)
+    chi_sq = np.sum((residuals / all_A_sigma) ** 2)
+    dof = len(all_A_vals) - len(popt_sine)
+    print(f"Reduced χ² = {chi_sq/dof:.3f}")
 
 
 if __name__ == "__main__":
