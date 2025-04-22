@@ -18,6 +18,7 @@ plt.style.use("seaborn-v0_8-whitegrid")
 from scipy.signal import butter, filtfilt, find_peaks
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import curve_fit
+from scipy.stats import chi2 as chi2_dist
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -152,6 +153,45 @@ def main():
     if results:
         res_df = pd.DataFrame(results).sort_values("mass_g")
         res_df.to_csv("t2star_vs_mass.csv", index=False)
+
+        # ---------- weighted linear fit on 0.15 g ≤ m ≤ 0.42 g ----------
+        fit_mask = (res_df["mass_g"] >= 0.15) & (res_df["mass_g"] <= 0.42)
+        if fit_mask.sum() >= 3:  # need ≥3 points for a 2‑param fit
+            x_fit = res_df.loc[fit_mask, "mass_g"].to_numpy()
+            y_fit = res_df.loc[fit_mask, "T2star"].to_numpy() * 1e3  # ms
+            s_fit = res_df.loc[fit_mask, "T2star_err"].to_numpy() * 1e3  # ms
+
+            def lin(x, m, b):  # linear model
+                return m * x + b
+
+            # initial guess from an unweighted poly‑fit
+            m0, b0 = np.polyfit(x_fit, y_fit, 1)
+            popt_lin, pcov_lin = curve_fit(
+                lin,
+                x_fit,
+                y_fit,
+                p0=(m0, b0),
+                sigma=s_fit,
+                absolute_sigma=True,
+            )
+            m_fit, b_fit = popt_lin
+            # goodness‑of‑fit
+            chi2 = np.sum(((y_fit - lin(x_fit, *popt_lin)) / s_fit) ** 2)
+            dof = len(x_fit) - 2
+            red_chi2 = chi2 / dof
+            p_val = chi2_dist.sf(chi2, dof)
+
+            print(
+                f"Linear fit 0.15–0.42 g:  slope = {m_fit:.3f} ms/g,  "
+                f"intercept = {b_fit:.3f} ms"
+            )
+            print(f"Reduced χ² = {red_chi2:.2f} (χ² = {chi2:.2f}, dof = {dof})")
+            print(f"χ² GOF p‑value = {p_val:.3f}")
+
+        else:
+            m_fit = b_fit = None  # so we know not to plot a line
+
+        # --------------------------- plotting ---------------------------
         plt.figure(figsize=(7, 4))
         plt.errorbar(
             res_df.mass_g,
@@ -159,10 +199,24 @@ def main():
             yerr=res_df.T2star_err * 1e3,
             fmt="o",
             capsize=4,
+            label=r"$T_2^{\!*}$ data",
         )
+
+        # add best‑fit line if it was computed
+        if m_fit is not None:
+            x_line = np.linspace(0.15, 0.42, 200)
+            plt.plot(
+                x_line,
+                m_fit * x_line + b_fit,
+                "r-",
+                lw=1.4,
+                label="Linear Fit",
+            )
+
         plt.xlabel("Sample mass (g)")
         plt.ylabel(r"$T_2^{\!*}$ (ms)")
-        plt.title(r"$T_2^{\!*}$ vs Sample Mass")
+        plt.title(r"$T_2^{\!*}$ vs Sample Mass")
+        plt.legend()
         plt.tight_layout()
         plt.savefig("T2star_vs_sample_mass.png")
         plt.close()
