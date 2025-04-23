@@ -46,7 +46,7 @@ from scipy.optimize import curve_fit
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ------------------- USER TOGGLE HERE -------------------
-SIGN_MODE = "plus"  # choose "plus" or "minus"
+SIGN_MODE = "minus"  # choose "plus" or "minus"
 # --------------------------------------------------------
 
 
@@ -353,11 +353,12 @@ def main():
         label="Data (±σ)",
     )
     plt.plot(x_fit, y_fit, "--", label="Sinusoid Fit")
-    plt.xlabel("Pulse Time (μs)")
-    plt.ylabel("Amplitude (a.u.)")
-    plt.title("Amplitude vs Pulse Time")
+    plt.tick_params(axis="both", which="major", labelsize=14)
+    plt.xlabel("Pulse Time (μs)", fontsize=16)
+    plt.ylabel("Amplitude (a.u.)", fontsize=16)
+    plt.title("Amplitude vs Pulse Time", fontsize=18)
     plt.grid(True)
-    plt.legend()
+    plt.legend(fontsize=14)
     plt.tight_layout()
     plt.savefig("sinusoid_fit_SINGLE_{}.png".format(SIGN_MODE))
     plt.close()

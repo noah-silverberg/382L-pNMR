@@ -10,7 +10,6 @@ import os, re
 from collections import defaultdict
 import numpy as np, pandas as pd, matplotlib
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 plt.style.use("seaborn-v0_8-whitegrid")
@@ -213,10 +212,11 @@ def main():
                 label="Linear Fit",
             )
 
-        plt.xlabel("Sample mass (g)")
-        plt.ylabel(r"$T_2^{\!*}$ (ms)")
-        plt.title(r"$T_2^{\!*}$ vs Sample Mass")
-        plt.legend()
+        plt.tick_params(axis="both", which="major", labelsize=12)
+        plt.xlabel("Sample mass (g)", fontsize=14)
+        plt.ylabel(r"$T_2^{\!*}$ (ms)", fontsize=14)
+        plt.title(r"$T_2^{\!*}$ vs Sample Mass", fontsize=16)
+        plt.legend(fontsize=12)
         plt.tight_layout()
         plt.savefig("T2star_vs_sample_mass.png")
         plt.close()

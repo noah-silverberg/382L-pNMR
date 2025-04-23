@@ -29,8 +29,9 @@ import numpy as np
 import pandas as pd
 import matplotlib
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+plt.style.use("seaborn-v0_8-whitegrid")
 
 from scipy.signal import butter, filtfilt, hilbert
 from scipy.ndimage import gaussian_filter1d
@@ -231,10 +232,11 @@ def plot_and_fit(results_df, individual, fit_filename="t1_fit.png"):
         "--",
         label=f"Exponential Fit",
     )
-    plt.xlabel(r"$\tau$ (ms)")
-    plt.ylabel("Echo Amplitude (a.u.)")
-    plt.title(r"Echo Amplitude vs Wait Time ($\tau$)")
-    plt.legend()
+    plt.tick_params(axis="both", which="major", labelsize=14)
+    plt.xlabel(r"$\tau$ (ms)", fontsize=16)
+    plt.ylabel("Echo Amplitude (a.u.)", fontsize=16)
+    plt.title(r"Echo Amplitude vs Wait Time ($\tau$)", fontsize=18)
+    plt.legend(fontsize=12)
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(fit_filename)
